@@ -1,0 +1,8 @@
+.viewport-editing .canvas-host canvas:focus-visible{outline:2px solid #a7bfff;outline-offset:-3px}
+.viewport-selection{position:absolute;top:53px;left:15px;right:15px;display:flex;align-items:center;gap:7px;width:fit-content;max-width:calc(100% - 30px);padding:7px 10px;color:#dce4f4;background:#1d2330e8;border:1px solid #a7bfff35;border-radius:6px;font-size:11px;pointer-events:none}
+.viewport-selection>svg{flex-shrink:0;color:#b1c5f6}
+.viewport-selection strong{font-weight:500;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.viewport-selection span{font-size:10px;color:#a0abc0;white-space:nowrap}
+.viewport-edit-hint{position:absolute;left:15px;bottom:50px;max-width:calc(100% - 30px);font-size:10px;line-height:1.6;color:#b2bcce;pointer-events:none;text-shadow:0 1px 3px #000}
+.viewport-dragging .canvas-host canvas{cursor:grabbing!important}
+@media(max-width:600px){.viewport-selection{top:46px;left:10px;max-width:calc(100% - 20px)}.viewport-selection span{display:none}.viewport-edit-hint{left:10px;bottom:48px;font-size:9px}}

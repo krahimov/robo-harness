@@ -1,0 +1,11 @@
+/* Dialogs shared by the conversation workspace. */
+.sb-camera-dialog{width:660px}
+.sb-camera-preview{position:relative;background:#14221a;aspect-ratio:4/3;display:grid;place-items:center;overflow:hidden}
+.sb-camera-preview video{display:block;width:100%;height:100%;object-fit:contain}
+.sb-camera-preview>span{position:absolute;display:flex;align-items:center;gap:10px;color:#96ae82;font-size:12px}
+.sb-camera-error{padding:14px 20px;background:#fcf5eb;color:#ac8b5b;font-size:12px;line-height:1.7}
+.sb-task-dialog{width:720px;max-height:90vh}
+.sb-task-editor{padding:20px;max-height:67vh;overflow:auto}
+.sb-task-editor>p{font-size:11px;line-height:1.7;color:#81966d;margin:0 0 16px}
+.sb-task-json{font-family:var(--mono);font-size:10px;line-height:1.7}
+@media(max-width:540px){.sb-camera-dialog .modal-footer{flex-wrap:wrap}.sb-camera-dialog .modal-footer .button{font-size:10px}}

@@ -1,0 +1,45 @@
+name: Studio checks
+on:
+  push:
+  pull_request:
+permissions:
+  contents: read
+concurrency:
+  group: checks-${{ github.ref }}
+  cancel-in-progress: true
+jobs:
+  backend:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        python: ['3.12', '3.13']
+    env:
+      MUJOCO_GL: osmesa
+      STUDIO_AUTHOR_PROVIDER: openai
+    steps:
+      - uses: actions/checkout@v7
+      - uses: astral-sh/setup-uv@20cfd1bf945f4377ade1205e4dbc17946fc9a30d # v10.0.1
+        with:
+          python-version: ${{ matrix.python }}
+          enable-cache: true
+      - name: Install headless rendering libraries
+        run: sudo apt-get update && sudo apt-get install -y libosmesa6 libgl1
+      - name: Install locked dependencies
+        working-directory: backend
+        run: uv sync --frozen
+      - name: Run runtime and protocol tests
+        working-directory: backend
+        run: uv run --frozen pytest -q
+  frontend:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v7
+        with:
+          node-version: '24'
+          cache: npm
+          cache-dependency-path: web/package-lock.json
+      - run: npm ci
+        working-directory: web
+      - run: npm run build
+        working-directory: web
