@@ -12,6 +12,8 @@ import numpy as np
 import mujoco
 from PIL import Image
 from studio.schemas import Scene, task_for_scene
+from studio.scene_graph import (ClothState, Drives, GraphState, apply_initial, cloth_xml, constraint_xml, drive_xml, graph_assets,
+    graph_xml, pinch_target)
 
 
 def numbers(values):
@@ -27,6 +29,26 @@ def geometry_extent(model, data, name):
         axis = rotation[:, 2]
         return np.abs(axis) * spec.size[1] + spec.size[0] * np.sqrt(np.maximum(0, 1-axis**2))
     return np.abs(rotation) @ spec.size
+
+
+def with_cloth(frame, cloth, data, drives=None):
+    """Add cloth vertex state, browser cloth meshes, and scene actuator/tendon state to a recorded frame."""
+    if drives is not None:
+        frame.update(drives.snapshot(data))
+    if cloth is None:
+        return frame
+    state, geoms = cloth.snapshot(data)
+    frame.update(state)
+    frame["geoms"] = frame["geoms"] + geoms
+    return frame
+
+
+def geom_kind(model, index, meshes=()):
+    """Browser shape name for a recorded geom; unknown primitives draw as boxes."""
+    if index in meshes:
+        return "mesh"
+    return {int(mujoco.mjtGeom.mjGEOM_CYLINDER): "cylinder", int(mujoco.mjtGeom.mjGEOM_SPHERE): "sphere",
+        int(mujoco.mjtGeom.mjGEOM_CAPSULE): "capsule"}.get(int(model.geom_type[index]), "box")
 
 
 def interpolate_orientation(start, end, fraction):
@@ -93,14 +115,28 @@ def xml(scene: Scene):
         conveyor_xml = f'<geom name="conveyor_belt" type="box" size="{half_x} {half_y} {belt.height / 2}" pos="{belt.x} {belt.y} {belt.height / 2}" rgba="0.14 0.18 0.19 1" friction="0.02 0.001 0.0001" priority="1"/>'
         if on_conveyor(belt, x, y):
             cube_z += belt.height
+    tray_xml = f'''<geom name="tray_base" type="box" size="0.125 0.095 0.008" pos="{scene.tray_x} {scene.tray_y} 0.008" rgba="0.57 0.7 0.56 1"/>
+<geom name="tray_north" type="box" size="0.125 0.005 0.025" pos="{scene.tray_x} {scene.tray_y + 0.09} 0.025" rgba="0.62 0.75 0.6 1"/>
+<geom name="tray_south" type="box" size="0.125 0.005 0.025" pos="{scene.tray_x} {scene.tray_y - 0.09} 0.025" rgba="0.62 0.75 0.6 1"/>
+<geom name="tray_east" type="box" size="0.005 0.085 0.025" pos="{scene.tray_x + 0.12} {scene.tray_y} 0.025" rgba="0.62 0.75 0.6 1"/>
+<geom name="tray_west" type="box" size="0.005 0.085 0.025" pos="{scene.tray_x - 0.12} {scene.tray_y} 0.025" rgba="0.62 0.75 0.6 1"/>''' if scene.include_tray else ""
+    cube_xml = f'''<body name="cube" pos="{x} {y} {cube_z}"><freejoint name="cube_free"/><geom name="block" type="box" size="0.025 0.025 0.025" mass="0.06" rgba="{numbers(scene.cube_color)}"/></body>''' if scene.include_cube else ""
+    if scene.include_cube:
+        object_grasps.insert(0, '<weld name="grasp" body1="gripper" body2="cube" active="false" relpose="0 0 0 1 0 0 0" solref="0.005 1"/>')
+    scene_equalities, scene_excludes = constraint_xml(scene.equalities, scene.contact_excludes)
+    scene_tendons, scene_actuators = drive_xml(scene.tendons, scene.actuators)
+    if scene.cloths:
+        # Idealized cloth pinch for the gantry; articulated robots replace body1 with their own hand.
+        scene_equalities = f'<connect name="cloth_pinch" body1="gripper" body2="{pinch_target(scene.cloths)}" anchor="0 0 0" active="false"/>' + scene_equalities
     solver = 'cone="elliptic" impratio="100" solver="Newton" tolerance="1e-10" noslip_iterations="5"' if scene.contact_solver == "precision" else ''
     contact = 'solref=".004 1" solimp=".95 .99 .001"' if scene.contact_solver == "precision" else ''
     return f'''<mujoco model="Cartesian manipulation fixture">
+      <compiler angle="radian" autolimits="true"/>
       <option timestep="0.002" gravity="0 0 -9.81" integrator="implicitfast" {solver}/>
       <visual><global offwidth="640" offheight="480"/><quality shadowsize="2048"/></visual>
-      <default><geom friction="{scene.friction} 0.01 0.001" condim="3" {contact}/><joint damping="15"/>
+      <default><geom friction="{scene.friction} 0.01 0.001" condim="3" {contact}/>
       <position kp="1800" kv="95"/></default>
-      <asset>{''.join(mesh_assets)}</asset>
+      <asset>{''.join(mesh_assets)}{graph_assets(scene.bodies)}</asset>
       <worldbody>
         <light pos="0 -0.3 2" dir="0 0 -1" diffuse="0.9 0.9 0.9"/>
         <camera name="overview" pos="1.05 -1.2 1.05" xyaxes="0.75 0.66 0 -0.4 0.46 0.79"/>
@@ -112,16 +148,12 @@ def xml(scene: Scene):
         <geom name="rail_right" type="box" size="0.02 0.4 0.02" pos="0.56 0 0.48" rgba="0.44 0.51 0.46 1" contype="0" conaffinity="0"/>
         <geom name="post_left" type="box" size="0.022 0.022 0.24" pos="-0.56 0.36 0.24" rgba="0.36 0.43 0.39 1" contype="0" conaffinity="0"/>
         <geom name="post_right" type="box" size="0.022 0.022 0.24" pos="0.56 0.36 0.24" rgba="0.36 0.43 0.39 1" contype="0" conaffinity="0"/>
-        <geom name="tray_base" type="box" size="0.125 0.095 0.008" pos="{scene.tray_x} {scene.tray_y} 0.008" rgba="0.57 0.7 0.56 1"/>
-        <geom name="tray_north" type="box" size="0.125 0.005 0.025" pos="{scene.tray_x} {scene.tray_y + 0.09} 0.025" rgba="0.62 0.75 0.6 1"/>
-        <geom name="tray_south" type="box" size="0.125 0.005 0.025" pos="{scene.tray_x} {scene.tray_y - 0.09} 0.025" rgba="0.62 0.75 0.6 1"/>
-        <geom name="tray_east" type="box" size="0.005 0.085 0.025" pos="{scene.tray_x + 0.12} {scene.tray_y} 0.025" rgba="0.62 0.75 0.6 1"/>
-        <geom name="tray_west" type="box" size="0.005 0.085 0.025" pos="{scene.tray_x - 0.12} {scene.tray_y} 0.025" rgba="0.62 0.75 0.6 1"/>
-        <body name="gantry_y" pos="0 0 0"><joint name="y" type="slide" axis="0 1 0" range="-0.35 0.35"/>
+        {tray_xml}
+        <body name="gantry_y" pos="0 0 0"><joint name="y" type="slide" axis="0 1 0" range="-0.35 0.35" damping="15"/>
           <geom name="crossbeam" type="box" size="0.55 0.026 0.022" pos="0 0 0.48" mass="0.1" rgba="0.55 0.63 0.57 1" contype="0" conaffinity="0"/>
-          <body name="carriage"><joint name="x" type="slide" axis="1 0 0" range="-0.5 0.5"/>
+          <body name="carriage"><joint name="x" type="slide" axis="1 0 0" range="-0.5 0.5" damping="15"/>
             <geom name="motor" type="box" size="0.055 0.047 0.042" pos="0 0 0.49" mass="0.1" rgba="0.82 0.85 0.78 1" contype="0" conaffinity="0"/>
-            <body name="gripper"><joint name="z" type="slide" axis="0 0 1" range="0.025 0.45"/>
+            <body name="gripper"><joint name="z" type="slide" axis="0 0 1" range="0.025 0.45" damping="15"/>
               <camera name="wrist" pos="0.07 -0.10 0.12" xyaxes="1 0 0 0 .707 .707"/>
               <geom name="shaft" type="cylinder" size="0.012 0.10" pos="0 0 0.14" mass="0.05" rgba="0.62 0.67 0.64 1" contype="0" conaffinity="0"/>
               <geom name="palm" type="box" size="0.045 0.035 0.025" pos="0 0 0.06" mass="0.1" rgba="0.85 0.86 0.79 1" contype="0" conaffinity="0"/>
@@ -130,11 +162,15 @@ def xml(scene: Scene):
             </body>
           </body>
         </body>
-        <body name="cube" pos="{x} {y} {cube_z}"><freejoint name="cube_free"/><geom name="block" type="box" size="0.025 0.025 0.025" mass="0.06" rgba="{numbers(scene.cube_color)}"/></body>
+        {cube_xml}
         {''.join(object_bodies)}
+        {graph_xml(scene.bodies)}
+        {cloth_xml(scene.cloths)}
       </worldbody>
-      <equality><weld name="grasp" body1="gripper" body2="cube" active="false" relpose="0 0 0 1 0 0 0" solref="0.005 1"/>{''.join(object_grasps)}</equality>
-      <actuator><position joint="x" ctrlrange="-0.5 0.5"/><position joint="y" ctrlrange="-0.35 0.35"/><position joint="z" ctrlrange="0.025 0.45"/></actuator>
+      <equality>{''.join(object_grasps)}{scene_equalities}</equality>
+      <contact>{scene_excludes}</contact>
+      <tendon>{scene_tendons}</tendon>
+      <actuator><position joint="x" ctrlrange="-0.5 0.5"/><position joint="y" ctrlrange="-0.35 0.35"/><position joint="z" ctrlrange="0.025 0.45"/>{scene_actuators}</actuator>
     </mujoco>'''
 
 
@@ -147,12 +183,12 @@ class Simulator:
         self.source = xml(scene)
         self.model = mujoco.MjModel.from_xml_string(self.source)
         self.data = mujoco.MjData(self.model)
-        self.cube_body_id = self.model.body("cube").id
-        self.cube_geom_id = self.model.geom("block").id
         self.belt_geom_id = self.model.geom("conveyor_belt").id if scene.conveyor else None
-        self.objects = {"cube": {"body": "cube", "geom": "block", "joint": "cube_free", "eq": 0}}
-        for index, obj in enumerate(scene.objects, 1):
+        # Grasp welds come first in the equality list, in object order; scene constraints follow.
+        self.objects = {"cube": {"body": "cube", "geom": "block", "joint": "cube_free", "eq": 0}} if scene.include_cube else {}
+        for index, obj in enumerate(scene.objects, len(self.objects)):
             self.objects[obj.id] = {"body": f"object_{obj.id}", "geom": f"object_{obj.id}_geom", "joint": f"object_{obj.id}_free", "eq": index}
+        self.grasp_eqs = [obj["eq"] for obj in self.objects.values()]
         self.mesh_geometries = {}
         for i in range(self.model.ngeom):
             if self.model.geom_type[i] == mujoco.mjtGeom.mjGEOM_MESH:
@@ -164,8 +200,15 @@ class Simulator:
         self.data.joint("x").qpos[0] = -0.22
         self.data.joint("y").qpos[0] = -0.08
         self.data.joint("z").qpos[0] = 0.28
-        self.data.ctrl[:] = [-0.22, -0.08, 0.28]
+        # The gantry owns the first three controls; scene actuators follow.
+        self.data.ctrl[:3] = [-0.22, -0.08, 0.28]
+        self.drives = Drives(self.model, scene.actuators, scene.tendons) if scene.actuators or scene.tendons else None
+        apply_initial(self.model, self.data, scene.bodies)
+        self.graph = GraphState(self.model, scene.bodies) if scene.bodies else None
+        self.cloth = ClothState(self.model, scene.cloths, "gripper") if scene.cloths else None
         mujoco.mj_forward(self.model, self.data)
+        if self.drives:
+            self.drives.apply(self.data)
         for _ in range(100):
             mujoco.mj_step(self.model, self.data)
         self.data.time = 0
@@ -199,32 +242,42 @@ class Simulator:
             force *= maximum / norm
         self.data.xfrc_applied[body_id, :2] = force
 
+    def holding(self):
+        return bool(self.grasp_eqs) and bool(self.data.eq_active[self.grasp_eqs].any())
+
     def snapshot(self):
-        return {
+        frame = {
             "t": round(self.data.time, 4),
             "ee": self.data.body("gripper").xpos.round(5).tolist(),
             "euler_xyz": [0., 0., 0.], "gripper": float(self.closed), "embodiment": "cartesian-gripper-v1",
-            "cube": self.data.body("cube").xpos.round(5).tolist(),
-            "cube_speed": round(float(np.linalg.norm(self.data.joint("cube_free").qvel[:3])), 5),
-            "cube_extent": (np.abs(self.data.geom("block").xmat.reshape(3, 3)) @ np.array([0.025]*3)).round(5).tolist(),
-            "attached": bool(self.data.eq_active[0]), "closed": self.closed,
+            **({"cube": self.data.body("cube").xpos.round(5).tolist(),
+                "cube_speed": round(float(np.linalg.norm(self.data.joint("cube_free").qvel[:3])), 5),
+                "cube_extent": (np.abs(self.data.geom("block").xmat.reshape(3, 3)) @ np.array([0.025]*3)).round(5).tolist()}
+                if self.scene.include_cube else {}),
+            "attached": bool(self.data.eq_active[0]) if self.scene.include_cube else self.holding(), "closed": self.closed,
             "qpos": self.data.qpos.round(7).tolist(),
             "objects": {id: {"position": self.data.body(obj["body"]).xpos.round(5).tolist(), "speed": round(float(np.linalg.norm(self.data.joint(obj["joint"]).qvel[:3])), 5), "extent": geometry_extent(self.model, self.data, obj["geom"]).round(5).tolist(), "attached": bool(self.data.eq_active[obj["eq"]])} for id, obj in self.objects.items()},
-            "geoms": [{"name": self.model.geom(i).name, "type": "mesh" if i in self.mesh_geometries else "cylinder" if self.model.geom_type[i] == 5 else "box", "size": self.model.geom_size[i].round(5).tolist(), "color": self.model.geom_rgba[i].round(3).tolist(), "position": self.data.geom_xpos[i].round(5).tolist(), "matrix": self.data.geom_xmat[i].round(6).tolist(), **self.mesh_geometries.get(i, {})} for i in range(self.model.ngeom)],
+            **(self.graph.snapshot(self.data) if self.graph else {}),
+            "geoms": [{"name": self.model.geom(i).name, "type": geom_kind(self.model, i, self.mesh_geometries), "size": self.model.geom_size[i].round(5).tolist(), "color": self.model.geom_rgba[i].round(3).tolist(), "position": self.data.geom_xpos[i].round(5).tolist(), "matrix": self.data.geom_xmat[i].round(6).tolist(), **self.mesh_geometries.get(i, {})} for i in range(self.model.ngeom)],
         }
+        return with_cloth(frame, self.cloth, self.data, self.drives)
 
     def step(self, action):
         if action.get("euler_xyz") is not None and any(abs(value) > 1e-7 for value in action["euler_xyz"]):
             raise ValueError("The Cartesian fixture cannot execute end-effector rotation. Select the Franka embodiment.")
-        self.data.ctrl[:] = [action["x"], action["y"], action["z"]]
+        self.data.ctrl[:3] = [action["x"], action["y"], action["z"]]
+        if self.drives:
+            self.drives.apply(self.data)
         self.closed = action["closed"] if action.get("gripper") is None else action["gripper"] > .5
         gap = 0.028 if self.closed else 0.042
         self.model.geom("finger_left").pos[0] = -gap
         self.model.geom("finger_right").pos[0] = gap
         if not self.closed:
-            self.data.eq_active[:] = 0
+            self.data.eq_active[self.grasp_eqs] = 0
+        if self.cloth:
+            self.cloth.update(self.data, self.closed, self.data.body("gripper").xpos)
         for _ in range(25):
-            if self.closed and not any(self.data.eq_active):
+            if self.closed and self.objects and not self.holding():
                 candidates = sorted(self.objects.values(), key=lambda obj: np.linalg.norm(self.data.body(obj["body"]).xpos - self.data.body("gripper").xpos))
                 obj = candidates[0]
                 delta = self.data.body(obj["body"]).xpos - self.data.body("gripper").xpos
@@ -245,13 +298,13 @@ class Simulator:
 
 
 def make_simulator(scene: Scene):
-    if scene.embodiment == "franka-panda-v1":
-        from studio.adapters.franka import FrankaSimulator
-        return FrankaSimulator(scene)
-    return Simulator(scene)
+    from studio.robots import robot
+    return robot(scene.embodiment).factory()(scene)
 
 
 def default_waypoints(scene: Scene, clearance=0.2):
+    if not (scene.include_cube and scene.include_tray):
+        raise ValueError("Scenes without the primary block and tray need a human task teacher, skills, or explicit waypoints")
     sim = make_simulator(scene)
     x, y, z = sim.snapshot()["cube"]
     z = max(0.025, z)
@@ -290,6 +343,9 @@ def task_waypoints(scene: Scene, task: dict, clearance=.2):
     if task.get("id") == "pen-into-open-pouch" or task.get("root_id") == "pen-into-open-pouch":
         from studio.workflows import pen_pouch_waypoints
         return pen_pouch_waypoints(scene)
+    if task.get("teacher_skills"):
+        from studio.skills import compile_skills
+        return compile_skills(scene, task["teacher_skills"])
     if not task.get("operations"):
         return default_waypoints(scene, clearance)
     sim, points = make_simulator(scene), []

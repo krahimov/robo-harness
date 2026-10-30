@@ -1,4 +1,4 @@
-import type {Experiment} from './types';
+import {providerModel,type Experiment} from './types';
 
 export default function AstraRunDetails({run}:{run:Experiment}) {
   if(run.adapter!=='astra')return null;
@@ -6,11 +6,12 @@ export default function AstraRunDetails({run}:{run:Experiment}) {
   return <div className="astra-run-details">
     <div className="astra-run-summary" role="status">
       <strong>{run.phase?.replaceAll('_',' ')||'Queued'}</strong>
+      <span>Actor: {providerModel(run.actor_provider)}</span>
       <span>{run.message||'Waiting for the actor'}</span>
       <span>Development: {run.attempts?.length||0}/{run.max_attempts||3} proposals</span>
       <span>Final evaluation: {run.holdout_passes||0} passes / {run.holdout_completed||0} completed / {run.episodes} planned</span>
     </div>
-    <p className="field-help">{run.feedback_mode==='checkpoints'?'Camera checkpoints can revise remaining motions within each episode. The starting program and feedback rules stay frozen for final evaluation.':'Astra revises only the motion program between development attempts.'} Task, scene, context and judge stay fixed. Final cases never feed back into development or other episodes. Human acceptance is separate.</p>
+    <p className="field-help">{run.feedback_mode==='checkpoints'?'Camera checkpoints can revise remaining motions within each episode. The starting program and feedback rules stay frozen for final evaluation.':`${providerModel(run.actor_provider)} revises only the motion program between development attempts.`} Task, scene, context and judge stay fixed. Final cases never feed back into development or other episodes. Human acceptance is separate.</p>
     {run.outcome==='budget_exhausted'&&<p>No development program passed both checks within this budget. Final evaluation was not run.</p>}
     {!!run.attempts?.length&&<details open><summary>Development proposals</summary><ol className="astra-proposals">{run.attempts.map(a=><li key={a.number}>
       <div><strong>Proposal {a.number} · {a.status}</strong><span>{a.summary?`Model proposal: ${a.summary}`:null}</span></div>

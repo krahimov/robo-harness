@@ -1,4 +1,4 @@
-"""Bounded judge evidence requests using the saved Codex ChatGPT connection."""
+"""Bounded judge evidence requests using a saved subscription connection (Codex or Claude Code)."""
 import base64
 import json
 import subprocess
@@ -10,6 +10,7 @@ from typing import Literal
 from pydantic import Field, ValidationError
 
 from studio.authoring import AuthorError, check_cancel
+from studio.author_providers import MODELS, model_name, session_factory as provider_session
 from studio.codex_author import CodexSession
 from studio.judges import evidence_tool, validate_verdict
 from studio.schemas import StrictModel, task_for_scene
@@ -24,9 +25,8 @@ class JudgeReply(StrictModel):
 
 
 class JudgeSession(CodexSession):
-    def __init__(self, folder, instructions):
-        super().__init__(folder, instructions)
-        self.schema.write_text(json.dumps(JudgeReply.model_json_schema()), encoding="utf-8")
+    def __init__(self, folder, instructions, reply_model=JudgeReply):
+        super().__init__(folder, instructions, reply_model=reply_model)
 
 
 JUDGE_INSTRUCTIONS = """Evaluate a recorded robot attempt against the supplied human-owned task.
@@ -52,10 +52,14 @@ request supplies no evidence. Do not change the task or propose a new task here.
 
 
 def codex_judge(artifact, judge, *, session_factory=None, event=None):
-    if judge.get("model") != "gpt-6-astra":
-        raise ValueError("The Codex judge requires the exact model gpt-6-astra")
+    provider = judge.get("provider", "codex")
+    if provider not in {"codex", "claude"}:
+        raise ValueError("Choose codex or claude for a subscription judge")
+    if judge.get("model") != MODELS[provider]:
+        raise ValueError(f"The {'Claude Code' if provider == 'claude' else 'Codex'} judge requires the exact model {MODELS[provider]}")
+    name = model_name(provider)
     event = event or threading.Event()
-    session_factory = session_factory or JudgeSession
+    session_factory = session_factory or (JudgeSession if provider == "codex" else provider_session(provider, JudgeReply))
     task = artifact.get("task") or task_for_scene(artifact.get("scene", {}))
     history, trace, photos = [], [], []
     usage_total = {"input_tokens": 0, "output_tokens": 0}
@@ -75,13 +79,13 @@ def codex_judge(artifact, judge, *, session_factory=None, event=None):
                 try:
                     reply = JudgeReply.model_validate_json(raw)
                 except ValidationError:
-                    raise AuthorError("Astra returned an invalid judge response. The recording is preserved for review.") from None
+                    raise AuthorError(f"{name} returned an invalid judge response. The recording is preserved for review.") from None
                 if reply.action == "finish":
                     try:
                         result = validate_verdict(json.loads(reply.verdict_json), artifact, judge, trace)
                     except (ValueError, TypeError, KeyError):
-                        raise AuthorError("Astra returned an invalid judge verdict. The recording is preserved for review.") from None
-                    return {**result, "provider": "codex", "model": "gpt-6-astra", "usage": usage_total}
+                        raise AuthorError(f"{name} returned an invalid judge verdict. The recording is preserved for review.") from None
+                    return {**result, "provider": provider, "model": MODELS[provider], "usage": usage_total}
                 try:
                     output, rendered, item = evidence_tool(artifact, judge, reply.tool, reply.start, reply.end)
                     attachments = []
@@ -95,4 +99,4 @@ def codex_judge(artifact, judge, *, session_factory=None, event=None):
                     output = {"error": "Evidence could not be retrieved. Check the enabled tool and time range; camera rendering may be unavailable."}
                     trace.append({"tool": reply.tool, "ok": False})
                 history.append({"request": reply.model_dump(), "evidence": output})
-    raise AuthorError("Astra reached the judge turn limit without a verdict. The recording is preserved for review.")
+    raise AuthorError(f"{name} reached the judge turn limit without a verdict. The recording is preserved for review.")

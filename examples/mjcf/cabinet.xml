@@ -1,0 +1,46 @@
+<!-- Small two-compartment cabinet for MJCF import tests.
+     Front faces -X. A drawer slides out along -X; the upper door hinges at its left edge.
+     Angles use MuJoCo's default unit (degrees), so the importer must convert them. -->
+<mujoco model="cabinet">
+  <option timestep="0.002"/>
+  <default>
+    <geom type="box" rgba="0.82 0.78 0.70 1" friction="0.9 0.01 0.001"/>
+    <default class="panel">
+      <geom rgba="0.62 0.50 0.38 1"/>
+    </default>
+    <default class="handle">
+      <geom rgba="0.25 0.25 0.27 1" friction="1.2 0.01 0.001"/>
+    </default>
+    <joint damping="1.5" armature="0.002"/>
+  </default>
+  <worldbody>
+    <light pos="0 0 2"/>
+    <body name="cabinet" childclass="panel">
+      <geom name="floor" size="0.10 0.12 0.003" pos="0 0 0.003"/>
+      <geom name="top" size="0.10 0.12 0.003" pos="0 0 0.157"/>
+      <geom name="shelf" size="0.10 0.114 0.003" pos="0 0 0.08"/>
+      <geom name="back" size="0.003 0.12 0.08" pos="0.097 0 0.08"/>
+      <geom name="side_left" size="0.10 0.003 0.08" pos="0 -0.117 0.08"/>
+      <geom name="side_right" size="0.10 0.003 0.08" pos="0 0.117 0.08"/>
+      <body name="drawer" pos="0 0 0.04">
+        <joint name="drawer_slide" type="slide" axis="-1 0 0" range="0 0.14"/>
+        <geom name="front" size="0.004 0.112 0.033" pos="-0.097 0 0" rgba="0.70 0.56 0.42 1"/>
+        <geom name="bottom" size="0.09 0.106 0.003" pos="0 0 -0.03"/>
+        <geom name="wall_left" size="0.09 0.003 0.02" pos="0 -0.106 -0.01"/>
+        <geom name="wall_right" size="0.09 0.003 0.02" pos="0 0.106 -0.01"/>
+        <geom name="wall_back" size="0.003 0.106 0.02" pos="0.09 0 -0.01"/>
+        <geom class="handle" name="post_left" size="0.022 0.004 0.004" pos="-0.123 -0.035 0"/>
+        <geom class="handle" name="post_right" size="0.022 0.004 0.004" pos="-0.123 0.035 0"/>
+        <geom class="handle" name="bar" size="0.006 0.04 0.006" pos="-0.151 0 0"/>
+        <!-- Pull point inside the gap between the drawer front and the handle bar. -->
+        <site name="drawer_pull" pos="-0.125 0 0"/>
+      </body>
+      <body name="door" pos="-0.102 -0.114 0.12">
+        <joint name="door_hinge" type="hinge" axis="0 0 1" range="-100 0"/>
+        <geom name="door_panel" size="0.003 0.112 0.034" pos="0 0.112 0" rgba="0.70 0.56 0.42 1"/>
+        <geom class="handle" name="knob" type="cylinder" size="0.008 0.012" pos="-0.015 0.2 0" euler="0 90 0"/>
+        <site name="door_push" pos="-0.02 0.19 0"/>
+      </body>
+    </body>
+  </worldbody>
+</mujoco>

@@ -128,16 +128,13 @@ This is a draft for human review, not an activated judge or a modified task.
 def propose_rubric(judge, evidence, *, session_factory=None):
     from studio.authoring import AuthorError
     brief = json.dumps({"current_rubric": judge["rubric"], "enabled_tools": judge["tools"], "correction_evidence": evidence}, ensure_ascii=False)
-    if judge.get("provider", "openai") == "codex":
-        if judge.get("model") != "gpt-6-astra":
-            raise ValueError("The Codex judge requires the exact model gpt-6-astra")
-        from studio.codex_author import CodexSession
-        class RubricSession(CodexSession):
-            def __init__(self, folder, instructions):
-                super().__init__(folder, instructions)
-                self.schema.write_text(json.dumps(RubricReply.model_json_schema()), encoding="utf-8")
+    provider = judge.get("provider", "openai")
+    if provider in {"codex", "claude"}:
+        from studio.author_providers import MODELS, session_factory as provider_session
+        if judge.get("model") != MODELS[provider]:
+            raise ValueError(f"The {'Claude Code' if provider == 'claude' else 'Codex'} judge requires the exact model {MODELS[provider]}")
         with tempfile.TemporaryDirectory(prefix="studio-rubric-proposal-") as directory:
-            with (session_factory or RubricSession)(Path(directory), PROPOSAL_INSTRUCTIONS) as session:
+            with (session_factory or provider_session(provider, RubricReply))(Path(directory), PROPOSAL_INSTRUCTIONS) as session:
                 raw, _ = session.run(brief, [], threading.Event())
     else:
         endpoint = os.environ.get("STUDIO_JUDGE_ENDPOINT")

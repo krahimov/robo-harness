@@ -136,3 +136,20 @@ def test_scene_program_rejects_executable_fields_and_unbounded_programs():
         SceneProgram(**program(assumptions=["x" * 601]))
     with pytest.raises(ValueError):
         SceneProgram(**program(waypoints=[{"x": 0, "y": 0, "z": .2, "seconds": 3}] * 11))
+
+
+def test_unsupported_operation_is_declined_instead_of_substituted(setup):
+    setup["prompt"] = "Pour water into the cup"
+    requests = []
+    def handler(request):
+        payload = json.loads(request.content)
+        requests.append(payload)
+        assert "Other deformable solids, liquids" in payload["instructions"]
+        assert [tool["name"] for tool in payload["tools"]] == ["simulate_scene", "decline_request"]
+        decline = {"type": "function_call", "id": "fc_1", "call_id": "call_1", "name": "decline_request",
+            "arguments": json.dumps({"reason": "Pouring needs a liquid simulation."})}
+        return httpx.Response(200, json={"output": [decline]})
+    with pytest.raises(AuthorError, match="declined.*liquid") as error:
+        author_scene(setup, None, lambda message: None if "Reading" in message else pytest.fail(message), threading.Event(), client_factory=factory_for(handler))
+    assert len(requests) == 1
+    assert "unit-test-secret" not in str(error.value)

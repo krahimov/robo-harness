@@ -54,6 +54,13 @@ def parse_obj(text, *, max_vertices=MAX_VERTICES, max_faces=MAX_FACES, max_bytes
             continue
         else:
             raise ValueError("Upload geometry-only OBJ files without materials, textures, or external references")
+    return normalize_mesh(vertices, faces, max_vertices=max_vertices, max_faces=max_faces)
+
+
+def normalize_mesh(vertices, faces, *, max_vertices=MAX_VERTICES, max_faces=MAX_FACES):
+    """Center each axis on the bounding box and scale it to ±1; `size` keeps the full extents."""
+    if len(vertices) > max_vertices or len(faces) > max_faces:
+        raise ValueError(f"Meshes support at most {max_vertices} vertices and {max_faces} triangles")
     if len(vertices) < 4 or len(faces) < 4:
         raise ValueError("A mesh needs at least four vertices and four triangles")
     low = [min(v[i] for v in vertices) for i in range(3)]
@@ -62,7 +69,42 @@ def parse_obj(text, *, max_vertices=MAX_VERTICES, max_faces=MAX_FACES, max_bytes
     if min(size) < 1e-6:
         raise ValueError("A mesh needs nonzero thickness in all three dimensions")
     normalized = [[round((v[i] - (low[i] + high[i]) / 2) / (size[i] / 2), 7) for i in range(3)] for v in vertices]
-    return {"vertices": normalized, "faces": faces, "size": size, "vertex_count": len(vertices), "face_count": len(faces)}
+    return {"vertices": normalized, "faces": [[int(i) for i in face] for face in faces], "size": size,
+        "vertex_count": len(vertices), "face_count": len(faces)}
+
+
+def parse_stl(data: bytes):
+    """Binary or ASCII STL triangles, deduplicated into indexed vertices; no file references."""
+    if len(data) > MAX_OBJ_BYTES:
+        raise ValueError("STL files must be at most 256 KiB")
+    triangles = []
+    if len(data) >= 84 and 84 + 50 * int.from_bytes(data[80:84], "little") == len(data):
+        import struct
+        for k in range(int.from_bytes(data[80:84], "little")):
+            values = struct.unpack_from("<12f", data, 84 + 50 * k)
+            triangles.append([values[3:6], values[6:9], values[9:12]])
+    else:
+        text = data.decode("ascii", errors="strict")
+        points = [tuple(float(v) for v in line.split()[1:4]) for line in text.splitlines() if line.strip().startswith("vertex")]
+        if len(points) % 3:
+            raise ValueError("ASCII STL has an incomplete triangle")
+        triangles = [points[i:i + 3] for i in range(0, len(points), 3)]
+    index, vertices, faces = {}, [], []
+    for triangle in triangles:
+        face = []
+        for point in triangle:
+            if not all(math.isfinite(v) and abs(v) <= 10000 for v in point):
+                raise ValueError("Mesh coordinates must be finite and within ±10000 input units")
+            key = tuple(round(v, 7) for v in point)
+            if key not in index:
+                index[key] = len(vertices)
+                vertices.append(list(key))
+            face.append(index[key])
+        if len(set(face)) == 3:
+            faces.append(face)
+        if len(vertices) > MAX_VERTICES or len(faces) > MAX_FACES:
+            raise ValueError(f"Meshes support at most {MAX_VERTICES} vertices and {MAX_FACES} triangles; simplify the STL first")
+    return vertices, faces
 
 
 def public_asset(asset):

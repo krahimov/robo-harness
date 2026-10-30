@@ -12,8 +12,10 @@ from studio import storage as db
 from studio.authoring import MODEL, AuthorError, AuthorCancelled, SceneProgram, author_scene, compile_program
 from studio.images import MAX_IMAGE_BYTES, MAX_IMAGES, save_image, image_path
 from studio.schemas import StrictModel, Promotion, Scene
-from studio.author_providers import Provider, connection_status, default_provider, provider_status, refresh_codex_status
+from studio.author_providers import Provider, connection_status, default_provider, model_for, model_name, provider_status, refresh_codex_status
 from studio.task_api import get_task
+from studio.robots import Embodiment
+from studio.scene_graph import scene_asset_ids
 from studio.assets import mesh_data, public_asset
 from studio import scene_editing
 
@@ -61,7 +63,7 @@ class SceneDraft(StrictModel):
     parent_id: str | None = None
     provider: Provider | None = None
     builder: Literal['mujoco','blender'] = 'mujoco'
-    embodiment: Literal["cartesian-gripper-v1", "franka-panda-v1"] = "cartesian-gripper-v1"
+    embodiment: Embodiment = "cartesian-gripper-v1"
     task_id: str | None = Field(default=None, max_length=100)
     measurements: list[Measurement] = Field(default_factory=list, max_length=8)
     asset_ids: list[str] = Field(default_factory=list, max_length=4)
@@ -132,13 +134,14 @@ def create_scene(spec: SceneDraft):
         if spec.selected_object_id not in {o["id"] for o in scene_editing.scene_objects(parent)["objects"]}:
             raise HTTPException(422, "The selected object is not in the parent revision.")
     assets = [public_asset(mesh_data(id)) for id in spec.asset_ids]
+    provider = spec.provider or default_provider()
     return db.save("scene", {**spec.model_dump(), "name": spec.name.strip(), "prompt": spec.prompt.strip(),
         "task": task, "task_snapshot_locked": locked_task, "assets": assets,
         "task_id": parent.get("task_id") if locked_task else spec.task_id,
-        "provider": spec.provider or default_provider(),
+        "provider": provider,
         "root_id": (parent.get("root_id") or parent["id"]) if parent else None,
         "parent_program": ((parent.get('blender') or {}).get('program') if spec.builder=='blender' else None) or parent.get("spec") or parent.get("parent_program") if parent else None,
-        "status": "draft", "model": MODEL, "progress": [], "source": "astra"})
+        "status": "draft", "model": model_for(provider), "progress": [], "source": "astra"})
 
 
 def conveyor_program():
@@ -151,7 +154,7 @@ def conveyor_program():
 
 
 @router.post("/scenes/template", status_code=201)
-def template(task_id: str | None = None, embodiment: Literal["cartesian-gripper-v1", "franka-panda-v1"] = "cartesian-gripper-v1", builder: Literal['mujoco','blender']='mujoco'):
+def template(task_id: str | None = None, embodiment: Embodiment = "cartesian-gripper-v1", builder: Literal['mujoco','blender']='mujoco'):
     task = get_task(task_id) if task_id else None
     program = SceneProgram(name=task["name"], description=task["description"], assumptions=["Built-in teacher motion for the selected human task. No model was called."], scene=Scene.model_validate(task.get("suggested_scene", {}))) if task else conveyor_program()
     if builder=='blender':
@@ -211,7 +214,7 @@ def run_scene_edit(id, program, event):
             spec, artifact, verification = compile_program(program, child.get("task"), child.get("embodiment"))
         if child.get("task") and artifact["task"] != child["task"]:
             raise ValueError("The compiler changed the saved task. The parent revision is unchanged.")
-        asset_ids = list(dict.fromkeys(p["asset_id"] for p in spec["scene"]["props"] if p.get("asset_id")))
+        asset_ids = scene_asset_ids(spec["scene"])
         with job_lock:
             if event.is_set():
                 raise AuthorCancelled("Scene edit cancelled.")
@@ -278,6 +281,24 @@ def edit_scene(id: str, edit: scene_editing.SceneEdit):
     return queue_scene_edit(parent, program, summary, edit.object_id)
 
 
+@router.post("/mjcf/preview")
+def preview_mjcf(request: scene_editing.MjcfInsert):
+    """Convert without saving, so the UI can show bodies, joints, and warnings first."""
+    from studio.mjcf_import import convert
+    from studio.schemas import Scene
+    converted = convert(request.xml, request.name, request.position, request.yaw, request.decoded_files())
+    Scene(bodies=converted["bodies"], equalities=converted["equalities"], contact_excludes=converted["contact_excludes"],
+        tendons=converted["tendons"], actuators=converted["actuators"])
+    return converted
+
+
+@router.post("/scenes/{id}/mjcf", status_code=202)
+def insert_scene_mjcf(id: str, request: scene_editing.MjcfInsert):
+    parent = db.get("scene", id)
+    program, summary, warnings = scene_editing.insert_mjcf(parent, request)
+    return {**queue_scene_edit(parent, program, summary), "import_warnings": warnings}
+
+
 @router.post("/scenes/{id}/components", status_code=202)
 def insert_scene_component(id: str, request: scene_editing.ComponentInsert):
     parent = db.get("scene", id)
@@ -325,9 +346,9 @@ def run_author(id, event):
                     raise AuthorError("The compiler changed the saved task. Revise the scene without changing its destination or requirements.")
                 return result
             options["compiler"] = compile_revision
-        if (draft.get("provider") or "openai") == "codex":
+        if (draft.get("provider") or "openai") in {"codex", "claude"}:
             from studio.codex_author import author_scene_codex
-            result = author_scene_codex(draft, draft.get("parent_program"), progress, event,**options)
+            result = author_scene_codex(draft, draft.get("parent_program"), progress, event, provider=draft["provider"], **options)
         else:
             result = author_scene(draft, draft.get("parent_program"), progress, event,**options)
         with job_lock:
@@ -339,7 +360,7 @@ def run_author(id, event):
             result["task"] = result["artifact"]["task"]
             if result['artifact'].get('blender'):
                 result['blender']=result['artifact']['blender']
-                asset_ids=list(dict.fromkeys(p['asset_id'] for p in result['spec']['scene']['props'] if p.get('asset_id')))
+                asset_ids=scene_asset_ids(result['spec']['scene'])
                 result.update(asset_ids=asset_ids,assets=[public_asset(mesh_data(key)) for key in asset_ids])
             artifact_id = db.write_artifact(result.pop("artifact"))
             db.update("scene", id, **result, artifact_id=artifact_id, status="ready", error=None)
@@ -378,8 +399,9 @@ def generate_scene(id: str):
             raise HTTPException(409, "The scene author has four pending jobs. Wait for one to finish.")
         event = threading.Event()
         jobs[id] = event
-        scene = db.update("scene", id, status="queued", model=MODEL, source="astra", error=None,
-            progress=[{"message": f"Queued for GPT-6 Astra through {connection['name']}."}])
+        provider = draft.get("provider") or "openai"
+        scene = db.update("scene", id, status="queued", model=model_for(provider), source="astra", error=None,
+            progress=[{"message": f"Queued for {model_name(provider)} through {connection['name']}."}])
         pool.submit(run_author, id, event)
         return scene
 
@@ -403,7 +425,7 @@ def preview_revision(id: str, program: SceneProgram):
     spec, artifact, verification = compile_program(program, parent.get("task"))
     if parent.get("task") and artifact["task"] != parent["task"]:
         raise HTTPException(422, "The edited program changed the saved task. Its parent revision is unchanged.")
-    asset_ids = list(dict.fromkeys([*[prop.asset_id for prop in program.scene.props if prop.asset_id], *parent.get("asset_ids", [])]))[:4]
+    asset_ids = list(dict.fromkeys([*scene_asset_ids(program.scene.model_dump()), *parent.get("asset_ids", [])]))
     return db.save("scene", {"name": spec["name"], "prompt": "Manual scene revision", "image_ids": parent["image_ids"],
         "parent_id": id, "root_id": parent.get("root_id") or id, "status": "ready", "source": "manual", "model": None, 'builder':'mujoco',
         "task_id": parent.get("task_id"), "task": artifact["task"], "measurements": parent.get("measurements", []), "asset_ids": asset_ids, "assets": [public_asset(mesh_data(id)) for id in asset_ids], "embodiment": program.scene.embodiment,

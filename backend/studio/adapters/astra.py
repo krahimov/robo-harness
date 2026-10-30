@@ -8,7 +8,7 @@ from pydantic import Field, model_validator
 from studio.schemas import StrictModel
 from studio.adapters.simulation import make_simulator, interpolate_orientation
 from studio.authoring import check_cancel
-from studio.codex_author import CodexSession, SceneReply
+from studio.codex_author import SceneReply
 from studio.judges import rendered_frames
 
 VERSION = 'astra-motion-v1'
@@ -70,7 +70,7 @@ def observation(frame):
 
 
 def goals_for(scene, task):
-    goals = {'tray': [scene.tray_x, scene.tray_y, .065]}
+    goals = {'tray': [scene.tray_x, scene.tray_y, .065]} if scene.include_tray else {}
     for requirement in task.get('requirements', []):
         bounds = requirement.get('bounds')
         if bounds:
@@ -79,12 +79,12 @@ def goals_for(scene, task):
 
 
 def validate_targets(program, scene, task):
-    valid = {'cube', 'gripper', 'tray', *[o.id for o in scene.objects], *goals_for(scene, task)}
+    valid = {*(['cube'] if scene.include_cube else []), 'gripper', *[o.id for o in scene.objects], *goals_for(scene, task)}
     if any(m.target not in valid for m in program.motions):
         raise ValueError('Unknown motion target; use an object ID, gripper, or a supplied goal')
 
 
-def execute(scene, task, program, event, checkpoint=None):
+def execute(scene, task, program, event, checkpoint=None, provider='codex'):
     """Return partial evidence on interruption or execution failure."""
     validate_targets(program, scene, task)
     sim = make_simulator(scene)
@@ -142,10 +142,11 @@ def execute(scene, task, program, event, checkpoint=None):
     except Exception as exc:
         error_type = type(exc).__name__
         error = 'Cancelled during simulation' if event.is_set() else (str(exc) if isinstance(exc, ValueError) else 'Simulation execution failed')
+    from studio.author_providers import model_for
     return {'scene': scene.model_dump(), 'task': task, 'xml': sim.source, 'frames': frames,
         'actions': actions, 'frequency': sim.frequency, 'program': program.model_dump(),
         'execution_error': error, 'execution_error_type':error_type, 'feedback_trace':getattr(checkpoint,'traces',feedback_trace), 'model': {'adapter': 'astra', 'adapter_version': VERSION,
-            'model': 'gpt-6-astra', 'provider': 'codex', 'fixed_weights': True, 'gradient_updates': 0,
+            'model': model_for(provider), 'provider': provider, 'fixed_weights': True, 'gradient_updates': 0,
             'observations': 'initial RGB + simulator state + sampled demo state/actions; live relative targets',
             'controller': 'camera checkpoints with bounded replanning' if checkpoint else 'bounded XYZ/yaw program; no per-step model replanning'}}
 
@@ -154,7 +155,9 @@ class Planner:
     def __init__(self, folder, experiment, initial_artifact, demos, event):
         self.folder = Path(folder)
         self.event = event
-        self.session = CodexSession(self.folder, RULES)
+        from studio.author_providers import session_factory
+        self.provider = experiment.get('actor_provider', 'codex')
+        self.session = session_factory(self.provider)(self.folder, RULES)
         scene = initial_artifact['scene']
         from studio.schemas import Scene
         self.scene = Scene(**scene)

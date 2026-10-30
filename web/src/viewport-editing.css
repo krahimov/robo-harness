@@ -1,8 +1,8 @@
-.viewport-editing .canvas-host canvas:focus-visible{outline:2px solid #a7bfff;outline-offset:-3px}
-.viewport-selection{position:absolute;top:53px;left:15px;right:15px;display:flex;align-items:center;gap:7px;width:fit-content;max-width:calc(100% - 30px);padding:7px 10px;color:#dce4f4;background:#1d2330e8;border:1px solid #a7bfff35;border-radius:6px;font-size:11px;pointer-events:none}
-.viewport-selection>svg{flex-shrink:0;color:#b1c5f6}
-.viewport-selection strong{font-weight:500;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
-.viewport-selection span{font-size:10px;color:#a0abc0;white-space:nowrap}
-.viewport-edit-hint{position:absolute;left:15px;bottom:50px;max-width:calc(100% - 30px);font-size:10px;line-height:1.6;color:#b2bcce;pointer-events:none;text-shadow:0 1px 3px #000}
+.viewport-editing .canvas-host canvas:focus-visible{outline:2px solid #ff7a3d;outline-offset:-3px}
+.viewport-selection{position:absolute;top:54px;left:14px;right:14px;z-index:1;display:flex;align-items:center;gap:8px;width:fit-content;max-width:calc(100% - 28px);padding:7px 11px;color:var(--vp-text);background:var(--vp-chip);border:1px solid #a7bfff45;border-radius:8px;font-size:12px;pointer-events:none;backdrop-filter:blur(8px);animation:rise .2s var(--ease)}
+.viewport-selection>svg{flex-shrink:0;color:#a7bfff}
+.viewport-selection strong{font-weight:600;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.viewport-selection span{font-size:11px;color:var(--vp-muted);white-space:nowrap}
+.viewport-edit-hint{position:absolute;left:14px;bottom:54px;z-index:1;max-width:calc(100% - 28px);font-family:var(--mono);font-size:10.5px;line-height:1.6;color:var(--vp-muted);pointer-events:none;text-shadow:0 1px 3px #000}
 .viewport-dragging .canvas-host canvas{cursor:grabbing!important}
-@media(max-width:600px){.viewport-selection{top:46px;left:10px;max-width:calc(100% - 20px)}.viewport-selection span{display:none}.viewport-edit-hint{left:10px;bottom:48px;font-size:9px}}
+@media(max-width:600px){.viewport-selection{top:48px;left:10px;max-width:calc(100% - 20px)}.viewport-selection span{display:none}.viewport-edit-hint{left:10px;bottom:50px;font-size:9.5px}}

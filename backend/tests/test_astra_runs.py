@@ -50,7 +50,7 @@ def fake_runtime(monkeypatch, results, raw_replies=None, cancel_on_execute=None)
             raw = raw_replies[len(history_seen)-1] if raw_replies else json.dumps({'action':'build','program_json':json.dumps(program()),'summary':'Test motion'})
             return {'reply':raw, 'usage': {'input_tokens':10, 'output_tokens':5}}
     monkeypatch.setattr(astra, 'Planner', Planner)
-    def execute(scene, task, proposed, event):
+    def execute(scene, task, proposed, event, provider='codex'):
         executions.append((scene.seed, proposed.model_dump(), copy.deepcopy(task)))
         if cancel_on_execute: event.set()
         return {'scene':scene.model_dump(),'task':task,'xml':'<mujoco/>', 'frames':[frame(),{**frame(),'t':1}],
@@ -234,7 +234,7 @@ def test_stress_and_feedback_are_frozen_and_feedback_is_fresh_per_episode(isolat
     prepared=prepare(isolated,feedback_mode='checkpoints',max_checkpoints=2,max_attempts=1)
     assert prepared['contract']['feedback_policy_sha256']
     old_execute=astra.execute;feedback=[]
-    def execute(scene,task,program,event,checkpoint=None):
+    def execute(scene,task,program,event,checkpoint=None,provider='codex'):
         feedback.append(checkpoint)
         return old_execute(scene,task,program,event)
     monkeypatch.setattr(astra,'execute',execute)

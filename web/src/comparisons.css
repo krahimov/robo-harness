@@ -1,1 +1,36 @@
-.comparison-setup,.comparison-results{background:#fff;border:1px solid var(--border);border-radius:8px;overflow:hidden}.comparison-setup{padding:22px}.comparison-fields{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:15px;margin:20px 0}.comparison-fields.four{grid-template-columns:repeat(4,minmax(0,1fr))}.comparison-conditions{display:grid;grid-template-columns:repeat(auto-fit,minmax(230px,1fr));gap:14px;margin:20px 0}.comparison-conditions article{border:1px solid var(--border);border-radius:6px;padding:14px;background:#fafcf7;min-width:0}.condition-title{display:flex;gap:6px;align-items:center}.condition-title input{min-width:0;margin:0}.condition-demo-list{max-height:220px;overflow:auto;margin:12px 0}.condition-demo-list label{display:flex;gap:9px;align-items:flex-start;padding:9px 0;font-size:12px;border-bottom:1px solid #e9efdf}.condition-demo-list input{margin-top:3px;flex-shrink:0}.condition-demo-list span{overflow-wrap:anywhere}.condition-demo-list small{display:block;color:#8a9a7b;font-size:10px;margin-top:5px}.condition-order{margin-left:auto;color:#6b8556;font-size:11px}.comparison-conditions article>p,.comparison-summary p{font-size:11px;color:#7a8b6c;line-height:1.7}.comparison-actions{display:flex;align-items:center;gap:12px;flex-wrap:wrap}.comparison-actions>.primary{margin-left:auto}.comparison-history{margin:24px 0 15px;max-width:460px}.comparison-summary{display:grid;grid-template-columns:repeat(auto-fit,minmax(200px,1fr));gap:20px;padding:22px}.comparison-summary article{min-width:0}.comparison-summary h3{margin:8px 0}.comparison-rate{font-size:32px;line-height:1.7;color:#526e3e;font-weight:500}.comparison-bar{height:6px;background:#edf2e5;border-radius:3px;overflow:hidden;margin:12px 0}.comparison-bar span{height:100%;display:block;background:#8ca56e}.comparison-summary .text-button{margin-top:12px}.comparison-table{overflow:auto}.comparison-note{font-size:11px;color:#849475;line-height:1.8;padding:20px}.comparisons>.inline-error{margin-bottom:15px}@media(max-width:1000px){.comparison-fields,.comparison-fields.four{grid-template-columns:repeat(2,minmax(0,1fr))}}@media(max-width:600px){.comparison-setup{padding:16px}.comparison-fields,.comparison-fields.four,.comparison-conditions,.comparison-summary{grid-template-columns:1fr}.comparison-actions>.primary{margin-left:0;width:100%}.comparison-table th{white-space:nowrap}.comparison-setup .section-title{align-items:flex-start}.comparison-setup h2{line-height:1.6}}
+.comparison-setup{padding:22px 24px}
+.comparison-setup>.section-title h2{font-size:15px}
+.comparison-results{overflow:hidden;margin-top:16px}
+.comparison-fields{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:14px;margin:18px 0 6px}
+.comparison-fields.four{grid-template-columns:repeat(4,minmax(0,1fr));margin-top:18px}
+.comparison-conditions{display:grid;grid-template-columns:repeat(auto-fit,minmax(250px,1fr));gap:14px;margin:6px 0 18px}
+.comparison-conditions article{position:relative;border:1px solid var(--line);border-radius:var(--radius-lg);padding:14px;background:var(--surface-2);min-width:0;counter-increment:condition}
+.comparison-conditions{counter-reset:condition}
+.comparison-conditions article::before{content:'C' counter(condition);position:absolute;top:-9px;left:14px;font-family:var(--mono);font-size:10px;font-weight:500;color:var(--accent-text);background:var(--surface);border:1px solid var(--accent-line);border-radius:999px;padding:1px 7px}
+.condition-title{display:flex;gap:6px;align-items:center}
+.condition-title input{min-width:0;margin:0;font-weight:600;background:transparent;border-color:transparent;padding-left:6px;font-size:14px}
+.condition-title input:hover{border-color:var(--line-2)}
+.condition-demo-list{max-height:220px;overflow:auto;margin:8px 0 10px}
+.condition-demo-list label{display:flex;gap:10px;align-items:flex-start;padding:9px 6px;font-size:13px;border-bottom:1px solid var(--line);color:var(--text);cursor:pointer;border-radius:6px}
+.condition-demo-list label:hover{background:var(--surface-3)}
+.condition-demo-list input{margin-top:2px;flex-shrink:0}
+.condition-demo-list span{overflow-wrap:anywhere}
+.condition-demo-list small{display:block;color:var(--text-4);font-family:var(--mono);font-size:10.5px;margin-top:3px}
+.condition-order{margin-left:auto;display:grid;place-items:center;width:20px;height:20px;flex-shrink:0;border-radius:50%;background:var(--accent);color:var(--accent-ink);font-family:var(--mono);font-size:10.5px;font-weight:500}
+.comparison-conditions article>p,.comparison-summary p{font-size:12.5px;color:var(--text-3);line-height:1.65}
+.comparison-actions{display:flex;align-items:center;gap:12px;flex-wrap:wrap}
+.comparison-actions>.primary{margin-left:auto}
+.comparison-history{margin:22px 0 0;max-width:480px}
+.comparison-summary{display:grid;grid-template-columns:repeat(auto-fit,minmax(220px,1fr));gap:1px;background:var(--line)}
+.comparison-summary article{min-width:0;background:var(--surface);padding:20px 22px}
+.comparison-summary h3{margin:8px 0 0;font-size:14px}
+.comparison-rate{display:block;font-family:var(--font-display);font-size:52px;font-weight:400;line-height:1.1;color:var(--text);margin:6px 0 4px;font-variant-numeric:tabular-nums}
+.comparison-bar{height:6px;background:var(--surface-3);border-radius:6px;overflow:hidden;margin:10px 0 12px}
+.comparison-bar span{height:100%;display:block;background:linear-gradient(90deg,var(--accent),var(--accent-hover));border-radius:6px;transition:width .6s var(--ease)}
+.comparison-summary .text-button{margin-top:12px}
+.comparison-table{overflow:auto;border-top:1px solid var(--line)}
+.comparison-table td:first-child{font-family:var(--mono);font-size:12px;color:var(--text-3)}
+.comparison-note{font-size:12.5px;color:var(--text-3);line-height:1.75;padding:18px 22px;border-top:1px solid var(--line);background:var(--surface-2)}
+.comparisons>.inline-error{margin-bottom:14px}
+@media(max-width:1000px){.comparison-fields,.comparison-fields.four{grid-template-columns:repeat(2,minmax(0,1fr))}}
+@media(max-width:600px){.comparison-setup{padding:16px}.comparison-fields,.comparison-fields.four,.comparison-conditions,.comparison-summary{grid-template-columns:1fr}.comparison-actions>.primary{margin-left:0;width:100%}.comparison-table th{white-space:nowrap}.comparison-setup .section-title{align-items:flex-start}.comparison-setup h2{line-height:1.5}}

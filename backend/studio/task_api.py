@@ -7,6 +7,8 @@ from pydantic import Field, model_validator
 
 from studio import storage as db
 from studio.schemas import StrictModel, Scene, task_for_scene
+from studio.skills import MAX_SKILLS, Skill, validate_skills
+from studio.robots import CLOTH_PINCH, CONTACT_FINGERS, robot
 
 router = APIRouter(prefix="/api")
 
@@ -16,15 +18,27 @@ class TaskRequirement(StrictModel):
     label: str = Field(min_length=1, max_length=150)
     definition: str = Field(min_length=1, max_length=1600)
     required: bool = True
-    check: Literal["inside_region", "inside_while_held", "released", "settled", "no_drops", "lifted", "lifted_once"]
+    check: Literal["inside_region", "inside_while_held", "released", "settled", "no_drops", "lifted", "lifted_once", "joint_range", "cloth_points_near"]
     object_id: str = Field(default="cube", min_length=1, max_length=40, pattern=r"^[A-Za-z][A-Za-z0-9_-]*$")
     region: Literal["tray"] | None = None
     bounds: list[float] | None = Field(default=None, min_length=6, max_length=6)
     min_height: float = Field(default=.12, ge=-.1, le=.5)
     max_speed: float = Field(default=.03, gt=0, le=.5)
+    # joint_range: the named scene-graph joint ends within [min_value, max_value] (radians or metres).
+    joint: str | None = Field(default=None, min_length=1, max_length=40, pattern=r"^[A-Za-z][A-Za-z0-9_]*$")
+    min_value: float | None = Field(default=None, ge=-7, le=7)
+    max_value: float | None = Field(default=None, ge=-7, le=7)
+    # cloth_points_near: vertices vertex_a and vertex_b of cloth object_id end within max_distance metres.
+    vertex_a: int | None = Field(default=None, ge=0, le=224)
+    vertex_b: int | None = Field(default=None, ge=0, le=224)
+    max_distance: float | None = Field(default=None, gt=0, le=.5)
 
     @model_validator(mode="after")
     def valid_region(self):
+        if self.check == "cloth_points_near" and (self.vertex_a is None or self.vertex_b is None or self.max_distance is None):
+            raise ValueError("A cloth_points_near requirement needs vertex_a, vertex_b, and max_distance")
+        if self.check == "joint_range" and (self.joint is None or self.min_value is None or self.max_value is None or self.min_value >= self.max_value):
+            raise ValueError("A joint_range requirement needs a joint and an increasing min_value/max_value")
         if self.check in {"inside_region", "inside_while_held"} and self.region is None and self.bounds is None:
             raise ValueError("An inside_region requirement needs tray or explicit XYZ bounds")
         if self.bounds and (not all(-1 <= v <= 1 for v in self.bounds) or any(self.bounds[i] >= self.bounds[i+1] for i in (0, 2, 4))):
@@ -51,6 +65,8 @@ class TaskCreate(StrictModel):
     description: str = Field(min_length=1, max_length=3000)
     requirements: list[TaskRequirement] = Field(min_length=1, max_length=24)
     operations: list[TaskOperation] = Field(default_factory=list, max_length=2)
+    # Human-owned teacher motion for tasks that operations cannot express (e.g. articulated parts).
+    teacher_skills: list[Skill] | None = Field(default=None, max_length=MAX_SKILLS)
     parent_id: str | None = None
 
     @model_validator(mode="after")
@@ -61,6 +77,10 @@ class TaskCreate(StrictModel):
             raise ValueError("Requirement IDs must be unique")
         if not any(r.required for r in self.requirements):
             raise ValueError("A task needs at least one required outcome")
+        if self.teacher_skills is not None:
+            validate_skills(self.teacher_skills)
+            if self.operations:
+                raise ValueError("Use either teacher operations or teacher skills, not both")
         return self
 
 
@@ -100,10 +120,37 @@ PRESETS.append({**_preset("pen-into-open-pouch", "Pen into an open pouch",
     pen_pouch_requirements(), [], pen_pouch_scene().model_dump()),
     "required_embodiment": "franka-panda-v1", "suggested_builder": "mujoco"})
 
+from studio.benchmarks import presets as benchmark_presets
+
+PRESETS.extend(benchmark_presets(_preset))
+
+from studio.articulated import (close_box_requirements, close_box_scene, close_box_skills,
+    fold_towel_requirements, fold_towel_scene, fold_towel_skills,
+    open_drawer_requirements, open_drawer_scene, open_drawer_skills)
+
+PRESETS.append({**_preset("close-box-flaps", "Close the box",
+    "Push both open cardboard flaps of the box closed without moving the box. Flaps are rigid panels on damped hinges; cardboard bending and creases are not simulated.",
+    close_box_requirements(), [], close_box_scene().model_dump()),
+    "teacher_skills": close_box_skills(), "required_capabilities": [CONTACT_FINGERS], "suggested_builder": "mujoco"})
+PRESETS.append({**_preset("open-drawer", "Open the drawer",
+    "Pull the lower drawer of the cabinet open by its handle without opening the upper door or moving the cabinet. The cabinet is imported from MJCF (examples/mjcf/cabinet.xml); slide damping is an assumption.",
+    open_drawer_requirements(), [], open_drawer_scene().model_dump()),
+    "teacher_skills": open_drawer_skills(), "required_capabilities": [CONTACT_FINGERS], "suggested_builder": "mujoco"})
+PRESETS.append({**_preset("fold-towel", "Fold the towel",
+    "Pinch one corner of the towel and lay it onto the opposite corner of the same edge, then let go. The towel is a MuJoCo flex cloth; the pinch is idealized: closing near a vertex holds it with a point constraint, not finger friction.",
+    fold_towel_requirements(), [], fold_towel_scene().model_dump()),
+    "teacher_skills": fold_towel_skills(), "required_capabilities": [CLOTH_PINCH], "suggested_builder": "mujoco"})
+
 
 def get_task(id):
     preset = next((task for task in PRESETS if task["id"] == id), None)
     return deepcopy(preset) if preset else db.get("task", id)
+
+
+@router.get("/robots")
+def list_robots():
+    from studio.robots import catalog
+    return catalog()
 
 
 @router.get("/tasks")
@@ -129,18 +176,35 @@ def create_task(spec: TaskCreate):
 def bind_task(scene: Scene | dict, task: dict):
     scene = Scene.model_validate(scene)
     task = deepcopy(task)
+    missing = set(task.get("required_capabilities") or []) - robot(scene.embodiment).capabilities
+    if missing:
+        raise ValueError(f"This task needs a robot with {', '.join(sorted(missing)).replace('_', ' ')}; {robot(scene.embodiment).name} lacks it")
     if task.get("required_embodiment") and task["required_embodiment"] != scene.embodiment:
-        raise ValueError("This task requires the articulated Franka arm to rotate and contact-grasp the pen")
+        raise ValueError("This task requires the articulated Franka arm to rotate and contact-grasp the pen"
+            if task.get("id") == "pen-into-open-pouch" else "This task requires the articulated Franka Panda embodiment")
     if task.get("schema_version") != 2:
         return task_for_scene(scene)
-    known = {"cube", *(obj.id for obj in scene.objects)}
-    used = {r["object_id"] for r in task["requirements"]} | {op["object_id"] for op in task.get("operations", [])}
+    if not scene.include_tray and any(r.get("region") == "tray" for r in task["requirements"]) | any(
+            op.get("destination") == "tray" for op in task.get("operations", [])):
+        raise ValueError("This task uses the destination tray, but the scene leaves it out")
+    bodies = [body for root in scene.bodies for body, _ in root.walk()]
+    known = {*(["cube"] if scene.include_cube else []), *(obj.id for obj in scene.objects), *(body.name for body in bodies),
+        *(cloth.name for cloth in scene.cloths)}
+    used = {r["object_id"] for r in task["requirements"] if r.get("check") != "joint_range"} | {op["object_id"] for op in task.get("operations", [])}
     if not used <= known:
         raise ValueError("Scene is missing task objects: " + ", ".join(sorted(used - known)))
+    sizes = {cloth.name: cloth.vertices for cloth in scene.cloths}
+    for r in task["requirements"]:
+        if r.get("check") == "cloth_points_near" and (r["object_id"] not in sizes or max(r["vertex_a"], r["vertex_b"]) >= sizes[r["object_id"]]):
+            raise ValueError(f"Requirement {r['id']} needs cloth {r['object_id']} with vertices {r['vertex_a']} and {r['vertex_b']}")
+    joints = {joint.name for body in bodies for joint in body.joints}
+    missing = {r["joint"] for r in task["requirements"] if r.get("check") == "joint_range"} - joints
+    if missing:
+        raise ValueError("Scene is missing task joints: " + ", ".join(sorted(missing)))
     for requirement in task["requirements"]:
         if requirement.get("region") == "tray":
             requirement["bounds"] = [scene.tray_x - .115, scene.tray_x + .115, scene.tray_y - .085, scene.tray_y + .085, .015, .085]
-    task["parameters"] = {"tray_x": scene.tray_x, "tray_y": scene.tray_y}
+    task["parameters"] = {"tray_x": scene.tray_x, "tray_y": scene.tray_y} if scene.include_tray else {}
     task["embodiment"] = scene.embodiment
     return task
 
@@ -152,7 +216,11 @@ def resolve_task(scene: Scene | dict, task_id: str | None = None):
 def _object(frame, id):
     if "objects" in frame and id in frame["objects"]:
         return frame["objects"][id]
-    if id == "cube":
+    if id in frame.get("bodies", {}):
+        return frame["bodies"][id]
+    if id in frame.get("cloths", {}):
+        return frame["cloths"][id]
+    if id == "cube" and "cube" in frame:
         return {"position": frame["cube"], "extent": frame["cube_extent"], "speed": frame["cube_speed"], "attached": frame["attached"]}
     return None
 
@@ -161,6 +229,28 @@ def measure_task(artifact, judge):
     frames, task = artifact["frames"], artifact["task"]
     outcomes = []
     for r in task["requirements"]:
+        if r["check"] == "joint_range":
+            values = [f.get("joints", {}).get(r["joint"], {}).get("value") for f in frames]
+            if not values or any(not isinstance(v, (int, float)) for v in values):
+                outcomes.append({"id": r["id"], "status": "unknown", "timestamps": [],
+                    "explanation": f"The recording has no scalar state for joint {r['joint']}."})
+                continue
+            passed = r["min_value"] <= values[-1] <= r["max_value"]
+            outcomes.append({"id": r["id"], "status": "pass" if passed else "fail", "timestamps": [frames[-1]["t"]],
+                "explanation": f"Final {r['joint']} value {values[-1]:.4f}; required {r['min_value']}..{r['max_value']}."})
+            continue
+        if r["check"] == "cloth_points_near":
+            cloth = frames[-1].get("cloths", {}).get(r["object_id"])
+            if not cloth:
+                outcomes.append({"id": r["id"], "status": "unknown", "timestamps": [],
+                    "explanation": f"The recording has no state for cloth {r['object_id']}."})
+                continue
+            import math
+            a, b = cloth["vertices"][r["vertex_a"]], cloth["vertices"][r["vertex_b"]]
+            distance = math.dist(a, b)
+            outcomes.append({"id": r["id"], "status": "pass" if distance <= r["max_distance"] else "fail", "timestamps": [frames[-1]["t"]],
+                "explanation": f"Final distance between {r['object_id']} vertices {r['vertex_a']} and {r['vertex_b']}: {distance:.4f} m; limit {r['max_distance']} m."})
+            continue
         observations = [_object(f, r["object_id"]) for f in frames]
         result, reason, timestamps = "unknown", "The recording has no complete state evidence for this object.", []
         if observations and all(obj is not None for obj in observations):
@@ -171,7 +261,8 @@ def measure_task(artifact, judge):
                 def inside(obj):
                     return bool(bounds) and all(bounds[2*i] <= obj["position"][i] - obj["extent"][i] and obj["position"][i] + obj["extent"][i] <= bounds[2*i+1] for i in range(3))
                 passed = inside(final)
-                reason = f"Final {r['object_id']} center {final['position']} m and half-extents {final['extent']} m; region {bounds}."
+                rounded = [round(v, 4) for v in bounds] if bounds else bounds
+                reason = f"Final {r['object_id']} center {final['position']} m and half-extents {final['extent']} m; region {rounded}."
                 if r["check"] == "inside_while_held":
                     matched = [f["t"] for f, obj in zip(frames, observations) if obj["attached"] and inside(obj)]
                     passed = bool(matched)
@@ -201,7 +292,8 @@ def measure_task(artifact, judge):
             result = "pass" if passed else "fail"
         outcomes.append({"id": r["id"], "status": result, "explanation": reason, "timestamps": timestamps})
     required = [o["status"] for o, r in zip(outcomes, task["requirements"]) if r["required"]]
-    status = "fail" if "fail" in required else "unknown" if "unknown" in required else "pass"
-    return {"status": status, "outcomes": outcomes, "needs_review": judge["require_review"] or any(o["status"] == "unknown" for o in outcomes),
+    # No required outcomes (for example, no task selected) can never count as a pass.
+    status = "fail" if "fail" in required else "unknown" if "unknown" in required or not required else "pass"
+    return {"status": status, "outcomes": outcomes, "needs_review": judge["require_review"] or status == "unknown" or any(o["status"] == "unknown" for o in outcomes),
         "kind": "state", "summary": f"Measured against human task {task['name']} v{task['version']}. Rubric prose does not change its thresholds.",
         "tool_trace": [{"tool": "inspect_state", "frames_inspected": len(frames), "ok": True}]}

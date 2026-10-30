@@ -21,7 +21,7 @@ from pydantic import Field, ValidationError
 
 from studio.authoring import (
     AUTHOR_INSTRUCTIONS, MAX_BUILDS, MAX_ROUNDS, MODEL, AuthorError,
-    SceneProgram, check_cancel, compile_program,
+    SceneProgram, camera_indexes, check_cancel, compile_program, declined,
 )
 from studio.images import image_path
 from studio.judges import rendered_frames
@@ -29,7 +29,7 @@ from studio.schemas import StrictModel
 
 
 class SceneReply(StrictModel):
-    action: Literal["build", "finish"]
+    action: Literal["build", "finish", "decline"]
     program_json: str = Field(max_length=60000)
     summary: str = Field(max_length=4000)
 
@@ -84,12 +84,15 @@ user configuration. Exec exposes this isolation directly while retaining
 Codex's supported authentication and refresh handling.
 """
 
-    def __init__(self, folder: Path, instructions: str):
+    provider = "codex"
+    model = MODEL
+
+    def __init__(self, folder: Path, instructions: str, reply_model=None):
         self.folder = folder
         self.instructions = folder / "scene-author.md"
         self.instructions.write_text(instructions, encoding="utf-8")
         self.schema = folder / "reply.schema.json"
-        self.schema.write_text(json.dumps(SceneReply.model_json_schema()), encoding="utf-8")
+        self.schema.write_text(json.dumps((reply_model or SceneReply).model_json_schema()), encoding="utf-8")
         self.deadline = time.monotonic() + JOB_TIMEOUT_SECONDS
         self.round = 0
         self.process = None
@@ -127,7 +130,7 @@ Codex's supported authentication and refresh handling.
     def command(self, reply_path, photos):
         args = [self.binary, "exec", "--ignore-user-config", "--ignore-rules",
             "--ephemeral", "--sandbox", "read-only", "--skip-git-repo-check",
-            "--cd", str(self.folder), "--model", MODEL, "--json", "--color", "never",
+            "--cd", str(self.folder), "--model", self.model, "--json", "--color", "never",
             "--output-schema", str(self.schema), "--output-last-message", str(reply_path)]
         overrides = ["project_doc_max_bytes=0", 'web_search="disabled"', "tools.view_image=false",
             "features.skip_host_skill_discovery=true", "suppress_unstable_features_warning=true",
@@ -215,7 +218,9 @@ camera images. You cannot execute commands or read files. Do not request tools.
 Correct failed placement, misses, or obstructed paths with another build.
 You may propose at most three builds. After seeing simulator feedback, set
 action="finish", program_json="", and summary to a short account of what you
-built, its measured outcome, and its limitations. Do not claim success before
+built, its measured outcome, and its limitations. To decline an unsupported or
+conflicting request, set action="decline", program_json="", and summary to the
+operation the studio cannot simulate; this needs no build. Do not claim success before
 receiving simulation evidence. A failed state check is evidence of failure.
 If camera rendering failed, disclose that visual comparison was unavailable.
 Generated demonstrations are scripted authoring output, not evidence of
@@ -236,7 +241,7 @@ def _compile_candidate(program_json, builds, latest, progress, event, folder, ta
         frames = artifact["frames"]
         report = {"candidate": builds, "compiled": True, "checks": verification["outcomes"],
             "duration": frames[-1]["t"], "assumptions": spec["assumptions"]}
-        indexes = sorted({0, max(range(len(frames)), key=lambda i: frames[i]["cube"][2]), len(frames) - 1})
+        indexes = camera_indexes(frames)
         progress("Inspecting recorded movement and simulator camera views.")
         try:
             for number, frame in enumerate(rendered_frames(artifact, indexes)):
@@ -265,15 +270,18 @@ def _compile_candidate(program_json, builds, latest, progress, event, folder, ta
     except ValueError:
         report = {"compiled": False, "retained_candidate": latest["builds"] if latest else None,
             "error": "The scene could not be simulated. Revise geometry, positions, and waypoints within the schema."}
-        progress("The scene could not run; sending validation feedback to Astra.")
+        progress("The scene could not run; sending validation feedback to the scene author.")
     return latest, report, photos
 
 
 def author_scene_codex(draft: dict, parent_program: dict | None, progress: Callable,
-                       event: threading.Event, *, session_factory=None, program_model=SceneProgram, compiler=None, extra_instructions=""):
-    """Generate a scene with saved Codex sign-in, using a bounded repair loop."""
+                       event: threading.Event, *, session_factory=None, program_model=SceneProgram, compiler=None, extra_instructions="",
+                       provider="codex"):
+    """Generate a scene with a saved subscription sign-in, using a bounded repair loop."""
+    from studio.author_providers import model_name, session_factory as provider_session
     check_cancel(event)
-    session_factory = session_factory or CodexSession
+    session_factory = session_factory or provider_session(provider)
+    model_label = model_name(provider)
     reference_photos = [(f"Photo reference {number + 1}.", image_path(image_id))
         for number, image_id in enumerate(draft["image_ids"])]
     latest = None
@@ -282,7 +290,7 @@ def author_scene_codex(draft: dict, parent_program: dict | None, progress: Calla
     history = []
     builds = 0
     total_usage = {"input_tokens": 0, "output_tokens": 0}
-    progress("Reading the scene brief and photos with your Codex subscription.")
+    progress(f"Reading the scene brief and photos with {model_label} through your {'Claude Code' if provider == 'claude' else 'Codex'} subscription.")
     with tempfile.TemporaryDirectory(prefix="studio-codex-author-") as directory:
         folder = Path(directory)
         with session_factory(folder, author_instructions(program_model,extra_instructions)) as session:
@@ -306,10 +314,12 @@ def author_scene_codex(draft: dict, parent_program: dict | None, progress: Calla
                 try:
                     reply = SceneReply.model_validate_json(raw)
                 except ValidationError:
-                    raise AuthorError("Astra returned an invalid scene response through Codex. Your draft is saved; retry generation.") from None
+                    raise AuthorError(f"{model_label} returned an invalid scene response. Your draft is saved; retry generation.") from None
+                if reply.action == "decline":
+                    raise declined(reply.summary, model_label)
                 if reply.action == "finish":
                     if latest is None:
-                        raise AuthorError("Astra did not build a scene. Revise the request and try again.")
+                        raise AuthorError(f"{model_label} did not build a scene. Revise the request and try again.")
                     notes = []
                     if report and not report["compiled"]:
                         notes.append(f"The last proposed revision could not run. The preview preserves runnable candidate {latest['builds']}.")
@@ -324,4 +334,4 @@ def author_scene_codex(draft: dict, parent_program: dict | None, progress: Calla
                 latest, report, feedback_photos = _compile_candidate(reply.program_json, builds,
                     latest, progress, event, folder, draft.get("task"), draft.get("embodiment"),program_model,compiler)
                 history.append({"proposal": reply.model_dump(), "simulation": report})
-    raise AuthorError("Astra reached the authoring turn limit. Revise the request and retry.")
+    raise AuthorError(f"{model_label} reached the authoring turn limit. Revise the request and retry.")

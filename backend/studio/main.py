@@ -105,7 +105,7 @@ def bootstrap():
         "adapters": [
             *adapter_statuses(),
             {"id": "mujoco", "name": "MuJoCo", "type": "simulator", "ready": True, "description": "Cartesian gripper with position control, object contact physics, and an idealized proximity grasp."},
-            {"id": "vlm", "name": "VLM judge", "type": "judge", "ready": any(c["configured"] for c in judge_connections()), "description": "Configurable judge using a saved Codex login or a VLM endpoint, with state and camera evidence, human labels, and calibration."},
+            {"id": "vlm", "name": "VLM judge", "type": "judge", "ready": any(c["configured"] for c in judge_connections()), "description": "Configurable judge using a saved Codex or Claude Code login, or a VLM endpoint, with state and camera evidence, human labels, and calibration."},
         ]}
 
 

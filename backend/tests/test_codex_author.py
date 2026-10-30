@@ -237,3 +237,15 @@ def test_cli_refuses_non_subscription_sign_in(fake_cli, monkeypatch):
     with pytest.raises(AuthorError, match="Sign in with ChatGPT"):
         with author.CodexSession(fake_cli, "instructions"):
             pytest.fail("A non-subscription login must not start authoring")
+
+
+def test_codex_unsupported_operation_is_declined_without_a_build(draft):
+    draft["prompt"] = "Pour water into the cup"
+    session = FakeSession([json.dumps({"action": "decline", "program_json": "",
+        "summary": "Pouring needs a liquid simulation."})])
+    with pytest.raises(AuthorError, match="declined.*liquid"):
+        author.author_scene_codex(draft, None, lambda message: None if "Reading" in message else pytest.fail(message),
+            threading.Event(), session_factory=session)
+    assert len(session.calls) == 1
+    assert "Other deformable solids, liquids" in session.instructions
+    assert 'action="decline"' in session.instructions

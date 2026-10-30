@@ -12,8 +12,13 @@ class ReplayModel:
     """
     supports_zero_demo = False
     def __init__(self, demonstrations, observation, **kwargs):
-        self.selected = min(demonstrations, key=lambda demo: np.linalg.norm(
-            np.array(demo["artifact"]["frames"][0]["cube"][:2]) - np.array(observation["cube"][:2])))
+        def distance(demo):
+            start = demo["artifact"]["frames"][0]
+            # Scenes without the primary block fall back to context order.
+            if "cube" not in start or "cube" not in observation:
+                return 0.
+            return np.linalg.norm(np.array(start["cube"][:2]) - np.array(observation["cube"][:2]))
+        self.selected = min(demonstrations, key=distance)
         self.actions = self.selected["artifact"]["actions"]
         self.index = 0
 
@@ -83,10 +88,13 @@ def build_model(adapter, demonstrations, observation, task, instructions, simula
 
 def adapter_statuses():
     from studio.adapters.icrt import status
-    from studio.author_providers import codex_status
-    return [{"id": "astra", "name": "GPT-6 Astra · motion programs", "type": "model", "ready": codex_status()["configured"],
-             "supports_zero_demo": True, "supports_comparisons": False, "setup": "Sign in with codex login on the backend machine",
-             "description": "State-assisted Franka motion programs with bounded development revisions and frozen holdouts. Uses initial RGB and sampled demonstration states/actions through your Codex subscription."},{"id": "replay", "name": "Nearest-demonstration replay", "type": "model", "ready": True,
+    from studio.author_providers import claude_status, codex_status
+    actors = [{"id": "codex", "model": "gpt-6-astra", "name": "GPT-6 Astra", **{k: codex_status()[k] for k in ("configured", "message")}},
+        {"id": "claude", "model": "claude-opus-5-5", "name": "Claude Opus 5.5", **{k: claude_status()[k] for k in ("configured", "message")}}]
+    return [{"id": "astra", "name": "LLM motion programs", "type": "model", "ready": any(a["configured"] for a in actors),
+             "supports_zero_demo": True, "supports_comparisons": False, "actors": actors,
+             "setup": "Sign in with codex login or claude auth login on the backend machine",
+             "description": "State-assisted Franka motion programs from GPT-6 Astra (Codex subscription) or Claude Opus 5.5 (Claude Code subscription), with bounded development revisions and frozen holdouts. Uses initial RGB and sampled demonstration states/actions; fixed weights, not robotics ICL."},{"id": "replay", "name": "Nearest-demonstration replay", "type": "model", "ready": True,
              "supports_zero_demo": False, "description": "Replays a selected trajectory without adaptation; not an ICL model."},
         {"id": "http", "name": "Robotics model endpoint", "type": "model", "ready": bool(os.environ.get("STUDIO_ROBOT_ENDPOINT")),
              "supports_zero_demo": True, "description": "External robot-harness-v1 state/action endpoint; vendor adapter required."}, status()]

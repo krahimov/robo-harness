@@ -88,13 +88,17 @@ def scene_objects(scene):
         from studio.adapters.simulation import on_conveyor
         if on_conveyor(spec.conveyor, spec.cube_x, spec.cube_y):
             z += spec.conveyor.height
-    objects = [_object("cube", "Task box", "movable", [spec.cube_x, spec.cube_y, z], [.025] * 3, ["block"], spec.cube_color, [0, 1], False,
-        ["The primary box has fixed size and rests on the table or conveyor."])]
-    tray = _object("tray", "Destination tray", "tray", [spec.tray_x, spec.tray_y, .025], [.125, .095, .025],
-        ["tray_base", "tray_north", "tray_south", "tray_east", "tray_west"], axes=[0, 1], resize=False)
-    if scene.get("task"):
-        tray.update(editable=False, position_axes=[], constraints=["The saved task fixes the destination bounds. Create a new task to move this tray."])
-    objects.append(tray)
+    objects = []
+    located = {r.get("object_id") for r in (scene.get("task") or {}).get("requirements", []) if r.get("check") in {"inside_region", "inside_while_held"}}
+    if spec.include_cube:
+        objects.append(_object("cube", "Task box", "movable", [spec.cube_x, spec.cube_y, z], [.025] * 3, ["block"], spec.cube_color, [0, 1], False,
+            ["The primary box has fixed size and rests on the table or conveyor."]))
+    if spec.include_tray:
+        tray = _object("tray", "Destination tray", "tray", [spec.tray_x, spec.tray_y, .025], [.125, .095, .025],
+            ["tray_base", "tray_north", "tray_south", "tray_east", "tray_west"], axes=[0, 1], resize=False)
+        if scene.get("task"):
+            tray.update(editable=False, position_axes=[], constraints=["The saved task fixes the destination bounds. Create a new task to move this tray."])
+        objects.append(tray)
     if spec.conveyor:
         belt = spec.conveyor
         half = [belt.length / 2, belt.width / 2] if belt.direction == "x" else [belt.width / 2, belt.length / 2]
@@ -104,6 +108,26 @@ def scene_objects(scene):
         objects.append(_object("object:" + item.id, item.id.replace("_", " "), "movable", item.position, item.size, ["object_" + item.id + "_geom"], item.color))
     for prop in spec.props:
         objects.append(_object("prop:" + prop.name, prop.name.replace("_", " "), "prop", prop.position, prop.size, ["prop_" + prop.name], prop.color))
+    for body in spec.bodies:
+        parts = [(item, geom, index) for item, _ in body.walk() for index, geom in enumerate(item.geoms)]
+        names = [f"geom_{item.name}_{geom.name or index}" for item, geom, index in parts]
+        joints = sum(len(item.joints) for item, _ in body.walk())
+        own = [(np.array(g.position), np.array(g.size if g.shape == "box" else [g.size[0], g.size[0], g.size[2]])) for g in body.geoms]
+        half = ((np.max([c + h for c, h in own], axis=0) - np.min([c - h for c, h in own], axis=0)) / 2).tolist()
+        item = _object("body:" + body.name, body.name.replace("_", " "), "articulated" if joints else "fixed body", body.position, half, names,
+            axes=[0, 1], resize=False, constraints=[f"Articulated body with {joints} joint{'' if joints == 1 else 's'}. Moving it moves every attached part; teacher skills follow its named sites.",
+                "Edit its parts, joints, and dimensions in the advanced scene specification."])
+        if located & {b.name for b, _ in body.walk()}:
+            # Like the tray: a saved task fixes where this body must end, so moving it would fail its own check.
+            item.update(editable=False, position_axes=[], constraints=["The saved task fixes this body's region. Create a new task version to move it."])
+        objects.append(item)
+    for cloth in spec.cloths:
+        half = [(cloth.count[0] - 1) * cloth.spacing / 2, (cloth.count[1] - 1) * cloth.spacing / 2, cloth.thickness]
+        item = _object("cloth:" + cloth.name, cloth.name.replace("_", " "), "cloth", cloth.position, half, ["cloth_" + cloth.name], cloth.color,
+            axes=[0, 1], resize=False, constraints=[f"{cloth.count[0]}×{cloth.count[1]} vertex MuJoCo flex cloth. Robots hold it with an idealized pinch."])
+        if cloth.name in located:
+            item.update(editable=False, position_axes=[], constraints=["The saved task fixes this cloth's region. Create a new task version to move it."])
+        objects.append(item)
     for assembly in getattr(program, "assemblies", []):
         center, half = _assembly_bounds(assembly)
         names = ["prop_bv_" + assembly.name]
@@ -150,6 +174,14 @@ def edited_program(scene, edit):
         if edit.size is not None:
             axis = 0 if belt["direction"] == "x" else 1
             belt.update(length=edit.size[axis] * 2, width=edit.size[1 - axis] * 2, height=edit.size[2] * 2)
+    elif edit.object_id.startswith("cloth:"):
+        cloth = next(c for c in spec["cloths"] if "cloth:" + c["name"] == edit.object_id)
+        if edit.position is not None:
+            cloth["position"][:2] = edit.position[:2]
+    elif edit.object_id.startswith("body:"):
+        body = next(b for b in spec["bodies"] if "body:" + b["name"] == edit.object_id)
+        if edit.position is not None:
+            body["position"][:2] = edit.position[:2]
     elif selected["kind"] in {"movable", "prop"}:
         kind, name = edit.object_id.split(":", 1)
         item = next(p for p in spec["objects" if kind == "object" else "props"] if p["id" if kind == "object" else "name"] == name)
@@ -296,3 +328,52 @@ def discard_edit_candidate(artifact):
         if asset.get("source") == "blender" and asset.get("build_id") == metadata["build_id"]:
             db.delete("asset", asset_id)
     shutil.rmtree(folder, ignore_errors=True)
+
+
+class MjcfInsert(StrictModel):
+    """Articulated object from a sanitized MJCF document, placed on the table."""
+    name: str = Field(min_length=1, max_length=16, pattern=r"^[A-Za-z][A-Za-z0-9_]*$")
+    xml: str = Field(min_length=10, max_length=256 * 1024)
+    position: Vector = Field(default_factory=lambda: [0, 0, 0])
+    yaw: float = Field(default=0, ge=-2 * math.pi, le=2 * math.pi)
+    # Companion OBJ/STL meshes named by <mesh file=...>, base64-encoded; never read from disk.
+    files: dict[Annotated[str, Field(pattern=r"^[A-Za-z0-9_.-]{1,80}$")], Annotated[str, Field(max_length=360 * 1024)]] = Field(default_factory=dict, max_length=8)
+
+    def decoded_files(self):
+        import base64, binascii
+        try:
+            return {name: base64.b64decode(data, validate=True) for name, data in self.files.items()}
+        except (binascii.Error, ValueError):
+            raise ValueError("Companion mesh files must be base64-encoded") from None
+
+
+def insert_mjcf(scene, request):
+    from studio.mjcf_import import convert, database_store
+    program = source_program(scene)
+    created, save = [], database_store(request.name)
+    def store(normalized):
+        created.append(save(normalized))
+        return created[-1]
+    try:
+        converted = convert(request.xml, request.name, request.position, request.yaw, request.decoded_files(), store)
+        data = program.model_dump()
+        data["scene"]["bodies"].extend(converted["bodies"])
+        data["scene"]["equalities"].extend(converted["equalities"])
+        data["scene"]["contact_excludes"].extend(converted["contact_excludes"])
+        data["scene"]["tendons"].extend(converted["tendons"])
+        data["scene"]["actuators"].extend(converted["actuators"])
+        data["waypoints"] = None
+        result = type(program).model_validate(data)
+        task_is_preserved(scene, result)
+    except ValueError as exc:
+        # Meshes stored for a rejected import are removed again.
+        for id in created:
+            db.delete("asset", id)
+        raise ValueError("Cannot add this MJCF object: " + validation_message(exc)) from None
+    counts = converted["summary"]
+    def count(n, word, plural=None):
+        return f"{n} {word if n == 1 else plural or word + 's'}"
+    summary = ", ".join([count(counts["bodies"], "body", "bodies"), count(counts["joints"], "joint"),
+        count(counts["sites"], "site"), count(counts["equalities"], "constraint")]
+        + [count(counts[key], word) for key, word in [("tendons", "tendon"), ("actuators", "actuator")] if counts[key]])
+    return result, f"Imported {request.name} from MJCF: {summary}.", converted["warnings"]

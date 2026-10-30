@@ -6,7 +6,7 @@ import tempfile
 from pathlib import Path
 from studio import storage as db
 from studio.adapters.astra import Program, observation, goals_for, validate_targets
-from studio.codex_author import CodexSession, SceneReply
+from studio.codex_author import SceneReply
 from studio.judges import rendered_frames
 from studio.authoring import check_cancel
 
@@ -34,8 +34,8 @@ POLICY_SHA256=hashlib.sha256((VERSION+RULES).encode()).hexdigest()
 
 
 class Feedback:
-    def __init__(self, scene, task, event, limit=2, progress=None):
-        self.scene,self.task,self.event,self.limit=scene,task,event,limit
+    def __init__(self, scene, task, event, limit=2, progress=None, provider='codex'):
+        self.scene,self.task,self.event,self.limit,self.provider=scene,task,event,limit,provider
         self.progress=progress or (lambda message:None)
         self.count=0
         self.traces=[]
@@ -57,10 +57,11 @@ class Feedback:
                 'remaining_motion_seconds':44-len(artifact['actions'])/artifact['frequency']}
             evidence_id=db.write_artifact({'brief':brief,'images':encoded})
             trace={'checkpoint':self.count,'t':artifact['frames'][-1]['t'],'reason':reason,
-                'evidence_artifact_id':evidence_id,'policy_sha256':POLICY_SHA256}
+                'evidence_artifact_id':evidence_id,'policy_sha256':POLICY_SHA256,'provider':self.provider}
             self.traces.append(trace)
             try:
-                with CodexSession(Path(folder),RULES) as session:
+                from studio.author_providers import session_factory
+                with session_factory(self.provider)(Path(folder),RULES) as session:
                     raw,usage=session.run(json.dumps(brief),images,self.event)
                 trace.update(reply_artifact_id=db.write_artifact({'reply':raw,'usage':usage}),usage=usage)
                 reply=SceneReply.model_validate_json(raw)

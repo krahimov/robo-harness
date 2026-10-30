@@ -18,12 +18,13 @@ def digest(value):
 
 
 def prepare(spec, prepared):
-    from studio.author_providers import codex_status
+    from studio.author_providers import model_for, subscription_status
     from fastapi import HTTPException
-    if not codex_status()['configured']:
-        raise HTTPException(409, 'Sign in with Codex on the backend machine to run Astra')
+    connection = subscription_status(spec.actor_provider)
+    if not connection['configured']:
+        raise HTTPException(409, connection.get('message') or 'Sign in to the selected subscription on the backend machine')
     if spec.scene.embodiment != 'franka-panda-v1':
-        raise ValueError('Astra motion programs require the Franka Panda embodiment')
+        raise ValueError('LLM motion programs require the Franka Panda embodiment')
     if spec.horizon_steps is not None:
         raise ValueError('Astra uses bounded motion durations instead of horizon_steps')
     if len(prepared['context']) > 4:
@@ -50,7 +51,8 @@ def prepare(spec, prepared):
     prepared.update(mode='improve_program', max_attempts=spec.max_attempts,
         holdout_seeds=seeds, attempts=[], phase='queued', holdout_completed=0,
         holdout_passes=0, outcome=None, frozen_program=None,
-        contract={'actor': 'gpt-6-astra', 'adapter_version': astra.VERSION, 'fixed_weights': True,
+        contract={'actor': model_for(spec.actor_provider), 'actor_provider': spec.actor_provider,
+            'adapter_version': astra.VERSION, 'fixed_weights': True,
             'mutable': ['motion_program'], 'feedback_mode':spec.feedback_mode, 'max_checkpoints':spec.max_checkpoints,
             'feedback_policy_sha256':POLICY_SHA256 if spec.feedback_mode=='checkpoints' else None, 'context_sampling': 'up to 16 state/action pairs per demonstration',
             'observations': 'initial RGB and explicit simulator state; live relative motion targets',
@@ -83,17 +85,20 @@ def persist_episode(run, artifact, phase, attempt, evaluate):
 
 
 def execute_episode(experiment, scene, task, program, event):
+    provider = experiment.get('actor_provider', 'codex')
     if experiment.get('feedback_mode') != 'checkpoints':
-        return astra.execute(scene,task,program,event)
+        return astra.execute(scene,task,program,event,provider=provider)
     from studio.adapters.astra_feedback import Feedback
     feedback=Feedback(scene,task,event,experiment.get('max_checkpoints',2),
-        progress=lambda message:db.update('experiment',experiment['id'],message=message))
-    return astra.execute(scene,task,program,event,checkpoint=feedback)
+        progress=lambda message:db.update('experiment',experiment['id'],message=message),provider=provider)
+    return astra.execute(scene,task,program,event,checkpoint=feedback,provider=provider)
 
 
 def run(id, event):
     from studio.main import save_evaluation
+    from studio.author_providers import model_name
     experiment = db.get('experiment', id)
+    actor = model_name(experiment.get('actor_provider', 'codex'))
     attempts, history = [], []
     try:
         check_cancel(event)
@@ -107,7 +112,7 @@ def run(id, event):
             with astra.Planner(Path(folder), experiment, initial, demos, event) as planner:
                 for attempt in range(1, experiment['max_attempts']+1):
                     check_cancel(event)
-                    db.update('experiment', id, phase='proposing', message=f'Astra is proposing development attempt {attempt}')
+                    db.update('experiment', id, phase='proposing', message=f'{actor} is proposing development attempt {attempt}')
                     item = {'number': attempt, 'status': 'proposing'}
                     attempts.append(item)
                     db.update('experiment', id, attempts=attempts)
@@ -177,5 +182,5 @@ def run(id, event):
         if attempts and attempts[-1]['status'] in {'proposing', 'simulating', 'judging'}:
             attempts[-1]['status'] = 'error'
             db.update('experiment', id, attempts=attempts)
-        message = str(exc) if isinstance(exc, AuthorError) else f'{type(exc).__name__}: Astra execution failed. Saved evidence is preserved.'
+        message = str(exc) if isinstance(exc, AuthorError) else f'{type(exc).__name__}: {actor} execution failed. Saved evidence is preserved.'
         db.update('experiment', id, status='failed', phase='finished', error=message, finished_at=db.now())

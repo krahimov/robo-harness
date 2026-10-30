@@ -38,7 +38,7 @@ class AcceptProposal(StrictModel):
 
 @router.get("/judge-lab/status")
 def lab_status():
-    return {"providers": judge_connections(), "codex_model": "gpt-6-astra"}
+    return {"providers": judge_connections(), "codex_model": "gpt-6-astra", "claude_model": "claude-opus-5-5"}
 
 
 @router.get("/judges/{id}/calibration")

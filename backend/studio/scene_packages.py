@@ -21,6 +21,7 @@ from starlette.concurrency import run_in_threadpool
 from studio import storage as db
 from studio.assets import mesh_data, parse_obj, public_asset
 from studio.authoring import SceneProgram, compile_program
+from studio.robots import robot
 from studio.images import MAX_IMAGE_BYTES, _normalize, image_path
 from studio.schemas import StrictModel, task_for_scene
 from studio.task_api import TaskCreate
@@ -121,7 +122,8 @@ def _obj(asset):
 
 
 def _asset_ids(program):
-    return {prop["asset_id"] for prop in program["scene"].get("props", []) if prop.get("asset_id")}
+    from studio.scene_graph import scene_asset_ids
+    return set(scene_asset_ids(program["scene"]))
 
 
 def _portable_xml(xml, embodiment):
@@ -156,9 +158,44 @@ def _portable_xml(xml, embodiment):
                 raise ValueError("Robot source and license are required")
             files["robot/" + name] = path.read_bytes()
         files["robot/SOURCE.txt"] = ("MuJoCo Menagerie Franka Panda\nhttps://github.com/google-deepmind/mujoco_menagerie\nCommit: " + ASSET_COMMIT + "\n").encode()
+    elif embodiment in _arm_configs():
+        files.update(_portable_arm(root, _arm_configs()[embodiment]))
     elif any("file" in element.attrib for element in root.iter()):
         raise ValueError("Unexpected external scene asset")
     return ET.tostring(root, encoding="utf-8"), files
+
+
+def _arm_configs():
+    from studio.adapters.arms import CONFIGS
+    return CONFIGS
+
+
+def _portable_arm(root, config):
+    """Menagerie arm parts: copy referenced meshes from the pinned part folders only."""
+    from studio.adapters.arms import MENAGERIE_COMMIT
+    folders = {folder.name: folder for folder in config.asset_folders()}
+    files = {}
+    for element in root.iter():
+        if "file" not in element.attrib:
+            continue
+        path = Path(element.get("file")).resolve()
+        folder = next((f for f in folders.values() if path.is_relative_to(f / "assets")), None)
+        if element.tag != "mesh" or folder is None or not re.fullmatch(r"[A-Za-z0-9_.-]+\.(?:obj|stl)", path.name, re.I):
+            raise ValueError("Unsupported scene file reference")
+        if not path.is_file() or path.stat().st_size > MAX_FILE_BYTES:
+            raise ValueError("Robot mesh is unavailable or exceeds the package limit")
+        relative = f"robot/{folder.name}/assets/{path.relative_to(folder / 'assets').as_posix()}"
+        files[relative] = path.read_bytes()
+        element.set("file", relative)
+    for part in config.parts:
+        folder = folders[part.folder]
+        for name in (part.file, "LICENSE"):
+            if not (folder / name).is_file():
+                raise ValueError("Robot source and license are required")
+            files[f"robot/{part.folder}/{name}"] = (folder / name).read_bytes()
+    files["robot/SOURCE.txt"] = (f"MuJoCo Menagerie {config.name}\nhttps://github.com/google-deepmind/mujoco_menagerie\nCommit: {MENAGERIE_COMMIT}\n"
+        "Parts: " + ", ".join(part.folder for part in config.parts) + "\n").encode()
+    return files
 
 
 def package_bytes(scene, include_references=True):
@@ -305,11 +342,12 @@ def _unpack(raw):
 
 def _remap(program, mapping):
     program = deepcopy(program)
-    for prop in program["scene"].get("props", []):
-        if prop.get("asset_id"):
-            if prop["asset_id"] not in mapping:
+    from studio.scene_graph import mesh_geoms
+    for item in [*program["scene"].get("props", []), *mesh_geoms(program["scene"])]:
+        if item.get("asset_id"):
+            if item["asset_id"] not in mapping:
                 raise ValueError("A scene mesh is missing from the package")
-            prop["asset_id"] = mapping[prop["asset_id"]]
+            item["asset_id"] = mapping[item["asset_id"]]
     return program
 
 
@@ -347,10 +385,8 @@ def import_package(raw, name=None):
     if manifest.blender_program_file:
         from studio.blender_schema import BlenderProgram
         blender_program = BlenderProgram.model_validate(_read_json(files[manifest.blender_program_file])).model_dump(exclude_none=True)
-    if program.scene.embodiment == "franka-panda-v1":
-        from studio.adapters.franka import available
-        if not available():
-            raise HTTPException(409, "Install the supplied Franka robot runtime before importing this scene. The package also contains standalone MuJoCo XML and robot assets.")
+    if not robot(program.scene.embodiment).available():
+        raise HTTPException(409, f"Install the supplied {robot(program.scene.embodiment).name} robot runtime before importing this scene. The package also contains standalone MuJoCo XML and robot assets.")
     # Parse every resource before creating files or records. Imported Python, XML and blend files are never run.
     prepared_assets = []
     for asset in manifest.assets:

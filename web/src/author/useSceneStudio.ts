@@ -1,5 +1,5 @@
 import {useEffect,useRef,useState} from 'react';
-import {api,type Artifact,type AuthoredScene,type AuthorStatus,type ReferenceImage,type SceneAsset,type SceneComponent,type SceneConfig,type TaskSpec} from '../types';
+import {api,type Artifact,type AuthoredScene,type AuthorStatus,type ReferenceImage,type SceneAsset,type SceneComponent,type SceneConfig,type TaskSpec,type RobotInfo} from '../types';
 import type {EditableSceneObject} from '../Viewport';
 
 export const activeScene=(scene?:AuthoredScene)=>!!scene&&['queued','running'].includes(scene.status);
@@ -14,6 +14,7 @@ export function useSceneStudio(){
   const [conversation,setConversation]=useState<AuthoredScene[]>([]);
   const [references,setReferences]=useState<ReferenceImage[]>([]);
   const [tasks,setTasks]=useState<TaskSpec[]>([]);
+  const [robots,setRobots]=useState<RobotInfo[]>([]);
   const [assets,setAssets]=useState<SceneAsset[]>([]);
   const [components,setComponents]=useState<SceneComponent[]>([]);
   const [objects,setObjects]=useState<EditableSceneObject[]>([]);
@@ -72,9 +73,9 @@ export function useSceneStudio(){
     mounted.current=true;const initialization=++selection.current;
     async function load(){
       try{
-        const [saved,images,knownTasks,knownAssets]=await Promise.all([api<AuthoredScene[]>('/scenes'),api<ReferenceImage[]>('/references'),api<TaskSpec[]>('/tasks'),api<SceneAsset[]>('/assets')]);
+        const [saved,images,knownTasks,knownAssets,knownRobots]=await Promise.all([api<AuthoredScene[]>('/scenes'),api<ReferenceImage[]>('/references'),api<TaskSpec[]>('/tasks'),api<SceneAsset[]>('/assets'),api<RobotInfo[]>('/robots')]);
         if(!mounted.current||initialization!==selection.current)return;
-        setScenes(saved);setReferences(images);setTasks(knownTasks);setAssets(knownAssets);
+        setScenes(saved);setReferences(images);setTasks(knownTasks);setAssets(knownAssets);setRobots(knownRobots);
         const remembered=localStorage.getItem('studio.author.scene');
         const initial=saved.find(item=>item.id===remembered)??saved[0];
         if(initial)await selectScene(initial);
@@ -143,6 +144,7 @@ export function useSceneStudio(){
   async function editObject(id:string,changes:{position?:number[];size?:number[];color?:number[]}){if(!current)return;await perform('edit',async()=>{
     const next=await api<AuthoredScene>('/scenes/'+current.id+'/edit',{object_id:id,...changes});await acceptScene(next,true);setSelectedId(id);
   });}
+  async function importMjcf(selected:File[]){if(!current)return;const file=selected.find(item=>/\.(xml|mjcf)$/i.test(item.name));if(!file){setError('Choose one MuJoCo XML file, plus any OBJ or STL meshes it names.');return;}await perform('component',async()=>{const stem=file.name.replace(/\.[^.]*$/,'').replace(/[^A-Za-z0-9_]/g,'_');const name=(/^[A-Za-z]/.test(stem)?stem:'obj_'+stem).slice(0,16);const files:Record<string,string>={};for(const mesh of selected.filter(item=>item!==file)){const bytes=new Uint8Array(await mesh.arrayBuffer());let binary='';for(let i=0;i<bytes.length;i+=8192)binary+=String.fromCharCode(...bytes.subarray(i,i+8192));files[mesh.name]=btoa(binary);}const result=await api<AuthoredScene&{import_warnings?:string[]}>('/scenes/'+current.id+'/mjcf',{name,xml:await file.text(),position:[.05,.1,0],yaw:0,files});await acceptScene(result,true);setNotice(['Imported '+file.name+' as '+name+'. Drag it into place; every edit reruns the simulation.',...(result.import_warnings??[])].join(' '));});}
   async function insertComponent(id:string){if(!current)return;await perform('component',async()=>{await acceptScene(await api<AuthoredScene>('/scenes/'+current.id+'/components',{component_id:id}),true);});}
   async function importPackage(file:File){await perform('import',async()=>{
     if(!file.name.toLowerCase().endsWith('.zip')||file.size>64*1024*1024)throw new Error('Choose a scene package ZIP up to 64 MiB.');
@@ -152,6 +154,7 @@ export function useSceneStudio(){
   async function refreshConnection(){await perform('connection',async()=>setAuthor(await api<AuthorStatus>('/author/status?refresh=true')));}
   function startPlayback(){setEditing(false);if(artifact&&frameIndex===artifact.frames.length-1)setFrameIndex(0);setPlaying(previous=>!previous);}
   function startEditing(){setPlaying(false);setFrameIndex(0);setEditing(true);}
-  return {author,scenes,current,conversation,references,tasks,assets,components,objects,config,prompt,artifact,selectedId,selected,busy,error,notice,loading,frameIndex,playing,editing,running,blocked,ready,connection,task,patchConfig,setPrompt,setSelectedId,setError,setNotice,setFrameIndex,setPlaying,setEditing,setTasks,perform,selectScene,acceptScene,newScene,saveDraft,send,cancel,upload,uploadMesh,template,editObject,insertComponent,importPackage,refreshConnection,startPlayback,startEditing};
+  const recordingLoading=!!current?.artifact_id&&!artifact;
+  return {author,scenes,current,conversation,references,tasks,robots,assets,recordingLoading,components,objects,config,prompt,artifact,selectedId,selected,busy,error,notice,loading,frameIndex,playing,editing,running,blocked,ready,connection,task,patchConfig,setPrompt,setSelectedId,setError,setNotice,setFrameIndex,setPlaying,setEditing,setTasks,perform,selectScene,acceptScene,newScene,saveDraft,send,cancel,upload,uploadMesh,template,editObject,insertComponent,importMjcf,importPackage,refreshConnection,startPlayback,startEditing};
 }
 export type SceneStudio=ReturnType<typeof useSceneStudio>;

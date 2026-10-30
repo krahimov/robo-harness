@@ -2,6 +2,9 @@ from copy import deepcopy
 import math
 from typing import Annotated, Literal
 from pydantic import BaseModel, Field, ConfigDict, model_validator
+from studio.scene_graph import (Cloth, GraphActuator, GraphEquality, GraphTendon, SceneBody, validate_constraints,
+    validate_drives, validate_graph)
+from studio.robots import CONTACT_FINGERS, Embodiment, robot
 
 
 class StrictModel(BaseModel):
@@ -73,7 +76,7 @@ class Conveyor(StrictModel):
 
 
 class Scene(StrictModel):
-    embodiment: Literal["cartesian-gripper-v1", "franka-panda-v1"] = "cartesian-gripper-v1"
+    embodiment: Embodiment = "cartesian-gripper-v1"
     seed: int = Field(default=42, ge=0, le=2**31-100)
     variation: float = Field(default=0, ge=0, le=0.15)
     friction: float = Field(default=0.8, ge=0.1, le=2)
@@ -84,10 +87,22 @@ class Scene(StrictModel):
     tray_x: float = Field(default=0.28, ge=-0.35, le=0.4)
     tray_y: float = Field(default=0.05, ge=-0.25, le=0.25)
     cube_color: Color = Field(default_factory=lambda: [0.91, 0.41, 0.16, 1])
+    # The legacy primary block and destination tray; scenes for other tasks can leave them out.
+    include_cube: bool = True
+    include_tray: bool = True
     table_color: Color = Field(default_factory=lambda: [0.23, 0.29, 0.26, 1])
     props: list[SceneProp] = Field(default_factory=list, max_length=24)
     conveyor: Conveyor | None = None
     objects: list[SceneObject] = Field(default_factory=list, max_length=5)
+    # Articulated scene graph: nested bodies with hinge/slide/ball/free joints.
+    bodies: list[SceneBody] = Field(default_factory=list, max_length=12)
+    # Constraints among scene-graph parts, e.g. closed linkages; robots are never referenced.
+    equalities: list[GraphEquality] = Field(default_factory=list, max_length=16)
+    cloths: list[Cloth] = Field(default_factory=list, max_length=2)
+    # Passive tendons and scheduled scene actuators (powered doors, springs, linkages); robots never drive them.
+    tendons: list[GraphTendon] = Field(default_factory=list, max_length=12)
+    actuators: list[GraphActuator] = Field(default_factory=list, max_length=8)
+    contact_excludes: list[Annotated[list[Annotated[str, Field(min_length=1, max_length=40)]], Field(min_length=2, max_length=2)]] = Field(default_factory=list, max_length=32)
 
     @model_validator(mode="after")
     def unique_props(self):
@@ -98,6 +113,15 @@ class Scene(StrictModel):
             raise ValueError("Movable object IDs must be unique")
         if sum(prop.shape == "mesh" for prop in self.props) > 4:
             raise ValueError("A scene supports at most four imported mesh props")
+        validate_graph(self.bodies, reserved={"cube", "tray", *(obj.id for obj in self.objects)})
+        validate_constraints(self.bodies, self.equalities, self.contact_excludes)
+        validate_drives(self.bodies, self.tendons, self.actuators)
+        names = [cloth.name for cloth in self.cloths]
+        bodies = {body.name for root in self.bodies for body, _ in root.walk()}
+        if len(names) != len(set(names)) or set(names) & (bodies | {"cube", "tray", *(obj.id for obj in self.objects)}):
+            raise ValueError("Cloth names must be unique and differ from objects and bodies")
+        if any(cloth.vertices <= len(cloth.pinned) for cloth in self.cloths):
+            raise ValueError("A cloth needs at least one vertex that is not pinned")
         return self
 
 
@@ -126,7 +150,7 @@ class JudgeSpec(StrictModel):
     tools: list[Literal["inspect_state", "replay_frames"]] = Field(default_factory=lambda: ["inspect_state", "replay_frames"])
     require_review: bool = True
     model: str = Field(default="", max_length=150)
-    provider: Literal["codex", "openai"] = "openai"
+    provider: Literal["codex", "claude", "openai"] = "openai"
 
     @model_validator(mode="after")
     def valid_judge_connection(self):
@@ -134,6 +158,8 @@ class JudgeSpec(StrictModel):
             raise ValueError("A VLM judge requires at least one evidence tool")
         if self.kind == "vlm" and self.provider == "codex" and self.model != "gpt-6-astra":
             raise ValueError("Codex judges require model gpt-6-astra")
+        if self.kind == "vlm" and self.provider == "claude" and self.model != "claude-opus-5-5":
+            raise ValueError("Claude Code judges require model claude-opus-5-5")
         return self
 
 
@@ -144,6 +170,9 @@ class ExperimentCreate(StrictModel):
     scene: Scene = Field(default_factory=Scene)
     episodes: int = Field(default=4, ge=1, le=24)
     adapter: Literal["replay", "http", "icrt", "astra"] = "replay"
+    # LLM behind the motion-program actor and its checkpoints: GPT-6 Astra via
+    # Codex or Claude Opus 5.5 via Claude Code. Ignored by other adapters.
+    actor_provider: Literal["codex", "claude"] = "codex"
     max_attempts: int = Field(default=3, ge=1, le=6)
     feedback_mode: Literal["none", "checkpoints"] = "none"
     max_checkpoints: int = Field(default=2, ge=1, le=3)
@@ -180,16 +209,23 @@ TASK = {
 }
 
 
+NO_TASK = {"id": None, "version": 0, "schema_version": 2, "name": "No task selected", "requirements": [],
+    "description": "This scene has no primary block and tray, and no human task was selected.",
+    "success": "Select or create a human task to measure outcomes."}
+
+
 def task_for_scene(scene: Scene | dict):
     """Bind stable task requirements to the authored tray, independently of the rubric."""
     scene = Scene.model_validate(scene)
+    if not (scene.include_cube and scene.include_tray):
+        return deepcopy(NO_TASK)
     task = deepcopy(TASK)
     x_min, x_max = scene.tray_x - 0.115, scene.tray_x + 0.115
     y_min, y_max = scene.tray_y - 0.085, scene.tray_y + 0.085
     task["description"] = "Place the block inside the tray and release it."
     task["parameters"] = {"tray_x": scene.tray_x, "tray_y": scene.tray_y}
     task["embodiment"] = scene.embodiment
-    if scene.embodiment == "franka-panda-v1":
+    if CONTACT_FINGERS in robot(scene.embodiment).capabilities:
         task["requirements"][1]["definition"] = "At episode end, the object is no longer held between the gripper fingers."
     task["requirements"][0]["definition"] = (
         "At episode end, block bounding box fits within the tray interior: "

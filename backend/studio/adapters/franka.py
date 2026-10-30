@@ -12,7 +12,8 @@ import xml.etree.ElementTree as ET
 import mujoco
 import numpy as np
 
-from studio.adapters.simulation import numbers, geometry_extent, xml as cartesian_xml
+from studio.adapters.simulation import numbers, geometry_extent, geom_kind, xml as cartesian_xml
+from studio.scene_graph import ClothState, Drives, GraphState, apply_initial
 
 BASE = np.array([-.45, -.15, 0.])
 ASSET_COMMIT = "8161bba264d7fa7c99ca301e91e7fb44737676ad"
@@ -55,9 +56,15 @@ def franka_xml(scene):
     for item in list(world):
         if item.get("name") in {"gantry_y", "rail_left", "rail_right", "post_left", "post_right"}:
             world.remove(item)
-    root.remove(root.find("actuator"))
-    root.remove(root.find("equality"))
-    ET.SubElement(root, "compiler", angle="radian", autolimits="true", meshdir=str((folder / "assets").resolve()))
+    # Keep the scene's own constraints, tendons, and actuators; gantry welds and motors are dropped with their sections.
+    scene_constraints = {tag: [item for item in root.find(tag) if item.get("name", "").startswith(("scene_eq_", "scene_act_")) or tag in {"contact", "tendon"}]
+        for tag in ["equality", "contact", "tendon", "actuator"]}
+    for tag in scene_constraints:
+        root.remove(root.find(tag))
+    compiler = root.find("compiler")
+    if compiler is None:
+        compiler = ET.SubElement(root, "compiler")
+    compiler.attrib.update(angle="radian", autolimits="true", meshdir=str((folder / "assets").resolve()))
     root.find("option").set("timestep", str(1 / 600))
     for item in panda.find("default"):
         root.find("default").append(item)
@@ -85,6 +92,16 @@ def franka_xml(scene):
         section = panda.find(tag)
         if section is not None:
             root.append(section)
+    if scene.cloths:
+        from studio.scene_graph import pinch_target
+        scene_constraints["equality"].insert(0, ET.Element("connect", name="cloth_pinch", body1="hand",
+            body2=pinch_target(scene.cloths), anchor="0 0 0", active="false"))
+    for tag, items in scene_constraints.items():
+        if items:
+            section = root.find(tag)
+            if section is None:
+                section = ET.SubElement(root, tag)
+            section.extend(items)
     # The tabletop fixture uses rubber fingertip pads and a firmer gripper
     # position servo. Contact forces remain bounded by Menagerie's 100 N limit.
     # These are explicit fixture/controller assumptions, not robot calibration.
@@ -107,6 +124,14 @@ def franka_xml(scene):
         if not geom.get("name"):
             geom.set("name", f"panda_geom_{index}")
     return ET.tostring(root, encoding="unicode")
+
+
+def legacy_cube(objects, grasps):
+    """Single-object frame keys kept for block-to-tray consumers; absent when the scene has no cube."""
+    if "cube" not in objects:
+        return {"attached": any(grasps.values())}
+    cube = objects["cube"]
+    return {"cube": cube["position"], "cube_speed": cube["speed"], "cube_extent": cube["extent"], "attached": grasps["cube"]}
 
 
 class FrankaSimulator:
@@ -132,15 +157,21 @@ class FrankaSimulator:
         self.closed = False
         self.ik_position_error = 0.
         self.ik_rotation_error = 0.
-        self.objects = {"cube": {"body": "cube", "geom": "block", "joint": "cube_free"}}
+        self.objects = {"cube": {"body": "cube", "geom": "block", "joint": "cube_free"}} if scene.include_cube else {}
         for item in scene.objects:
             self.objects[item.id] = {"body": f"object_{item.id}", "geom": f"object_{item.id}_geom", "joint": f"object_{item.id}_free"}
-        self.cube_body_id = self.model.body("cube").id
-        self.cube_geom_id = self.model.geom("block").id
+        self.cube_body_id = self.model.body("cube").id if scene.include_cube else None
+        self.cube_geom_id = self.model.geom("block").id if scene.include_cube else None
         self.belt_geom_id = self.model.geom("conveyor_belt").id if scene.conveyor else None
         self.data.qpos[self.arm_qpos] = [0, -.785, 0, -2.356, 0, 1.571, .785]
         self.data.joint("finger_joint1").qpos[0] = .04
         self.data.joint("finger_joint2").qpos[0] = .04
+        apply_initial(self.model, self.data, scene.bodies)
+        self.graph = GraphState(self.model, scene.bodies) if scene.bodies else None
+        self.cloth = ClothState(self.model, scene.cloths, "hand") if scene.cloths else None
+        self.drives = Drives(self.model, scene.actuators, scene.tendons) if scene.actuators or scene.tendons else None
+        if self.drives:
+            self.drives.apply(self.data)
         mujoco.mj_forward(self.model, self.data)
         initial = self.inverse_kinematics(np.array([-.22, -.08, .28]), [math.pi, 0, 0])
         self.data.qpos[self.arm_qpos] = initial
@@ -159,7 +190,8 @@ class FrankaSimulator:
             # compact link bounds; the authoritative MuJoCo cameras retain the
             # original detailed meshes. User-created static mesh props stay
             # bounded by the studio's small OBJ import limits.
-            if self.model.geom_type[i] == mujoco.mjtGeom.mjGEOM_MESH and self.model.geom_bodyid[i] == 0:
+            # Scene-graph meshes (named geom_*) move with their bodies; robot CAD meshes stay out.
+            if self.model.geom_type[i] == mujoco.mjtGeom.mjGEOM_MESH and (self.model.geom_bodyid[i] == 0 or self.model.geom(i).name.startswith("geom_")):
                 mid = self.model.geom_dataid[i]
                 start, count = self.model.mesh_vertadr[mid], self.model.mesh_vertnum[mid]
                 fstart, fcount = self.model.mesh_faceadr[mid], self.model.mesh_facenum[mid]
@@ -190,18 +222,22 @@ class FrankaSimulator:
         self.ik_rotation_error = float(np.linalg.norm(rotation_error))
         return self.ik_data.qpos[self.arm_qpos].copy()
 
-    def _contact_grasps(self):
-        touches = {name: set() for name in self.objects}
+    def _contact_grasps(self, bodies=None):
+        """Held means the gripper is closed and both finger bodies touch the object."""
+        bodies = bodies or {name: self.model.body(item["body"]).id for name, item in self.objects.items()}
+        touches = {name: set() for name in bodies}
         for contact in self.data.contact[:self.data.ncon]:
             pair = [int(self.model.geom_bodyid[contact.geom1]), int(self.model.geom_bodyid[contact.geom2])]
-            for name, item in self.objects.items():
-                if self.model.body(item["body"]).id in pair:
+            for name, id in bodies.items():
+                if id in pair:
                     touches[name].update(body for body in pair if body in {self.left_id, self.right_id})
         return {name: self.closed and fingers == {self.left_id, self.right_id} for name, fingers in touches.items()}
 
     def drive_conveyor(self):
-        self.data.xfrc_applied[self.cube_body_id, :3] = 0
         belt = self.scene.conveyor
+        if self.cube_body_id is None:
+            return
+        self.data.xfrc_applied[self.cube_body_id, :3] = 0
         if not belt:
             return
         if not any({c.geom1, c.geom2} == {self.cube_geom_id, self.belt_geom_id} for c in self.data.contact[:self.data.ncon]):
@@ -224,6 +260,10 @@ class FrankaSimulator:
             raise ValueError("Franka gripper target must be between zero and one")
         self.closed = grip > .5
         self.data.ctrl[7] = 255 * (1 - grip)
+        if self.cloth:
+            self.cloth.update(self.data, self.closed, self.data.site("ee").xpos)
+        if self.drives:
+            self.drives.apply(self.data)
         for _ in range(40):
             self.data.qfrc_applied[self.arm_dofs] = self.data.qfrc_bias[self.arm_dofs]
             self.drive_conveyor()
@@ -231,6 +271,10 @@ class FrankaSimulator:
         return self.snapshot()
 
     def snapshot(self):
+        from studio.adapters.simulation import with_cloth
+        return with_cloth(self._snapshot(), self.cloth, self.data, self.drives)
+
+    def _snapshot(self):
         grasps = self._contact_grasps()
         objects = {}
         for name, item in self.objects.items():
@@ -243,8 +287,7 @@ class FrankaSimulator:
         for i in range(self.model.ngeom):
             if self.model.geom_group[i] == 2:
                 continue
-            geoms.append({"name": self.model.geom(i).name, "type": "mesh" if i in self.mesh_geometries else
-                "cylinder" if self.model.geom_type[i] == mujoco.mjtGeom.mjGEOM_CYLINDER else "box",
+            geoms.append({"name": self.model.geom(i).name, "type": geom_kind(self.model, i, self.mesh_geometries),
                 "size": self.model.geom_size[i].round(5).tolist(), "color": self.model.geom_rgba[i].round(3).tolist(),
                 "position": self.data.geom_xpos[i].round(5).tolist(), "matrix": self.data.geom_xmat[i].round(6).tolist(),
                 **self.mesh_geometries.get(i, {})})
@@ -252,9 +295,9 @@ class FrankaSimulator:
             "euler_xyz": np.round(euler_xyz(self.data.site("ee").xmat.reshape(3, 3)), 6).tolist(),
             "gripper": float(np.clip(1 - self.data.joint("finger_joint1").qpos[0] / .04, 0, 1)),
             "closed": self.closed, "embodiment": "franka-panda-v1", "robot_base": BASE.tolist(),
-            "cube": objects["cube"]["position"], "cube_speed": objects["cube"]["speed"],
-            "cube_extent": objects["cube"]["extent"], "attached": grasps["cube"], "objects": objects,
+            **legacy_cube(objects, grasps), "objects": objects,
             "qpos": self.data.qpos.round(7).tolist(), "geoms": geoms,
+            **(self.graph.snapshot(self.data, self._contact_grasps(self.graph.bodies)) if self.graph else {}),
             "ik_position_error": round(self.ik_position_error, 6), "ik_rotation_error": round(self.ik_rotation_error, 6),
             "grasp_kind": "two-finger contact", "robot_asset_commit": ASSET_COMMIT,
             "wrist_camera_version": "side-mounted-pinch-v3"}

@@ -7,6 +7,8 @@ import {Maximize2, Scan, RotateCcw, Move, LockKeyhole} from 'lucide-react';
 import type {Frame} from './types';
 import './viewport-editing.css';
 
+const ROBOT_TAGS:Record<string,string>={'franka-panda-v1':'FRANKA PANDA','cartesian-gripper-v1':'CARTESIAN GRIPPER','ur5e-2f85-v1':'UR5E + ROBOTIQ 2F-85','ur5e-allegro-v1':'UR5E + ALLEGRO HAND','tidybot-v1':'TIDYBOT MOBILE'};
+
 let pandaVisuals:Promise<THREE.Group>|undefined;
 function loadPandaVisuals(){
   if(!pandaVisuals)pandaVisuals=fetch('/api/robot-visuals/franka-panda-v1.glb').then(async response=>{
@@ -14,6 +16,19 @@ function loadPandaVisuals(){
     return (await new GLTFLoader().parseAsync(await response.arrayBuffer(),'')).scene;
   }).catch(error=>{pandaVisuals=undefined;throw error;});
   return pandaVisuals;
+}
+
+const armVisuals=new Map<string,Promise<THREE.Group>>();
+function loadArmVisuals(embodiment:string){
+  let pending=armVisuals.get(embodiment);
+  if(!pending){
+    pending=fetch('/api/robot-visuals/arm/'+encodeURIComponent(embodiment)+'.glb').then(async response=>{
+      if(!response.ok)throw new Error('Optional robot CAD is unavailable.');
+      return (await new GLTFLoader().parseAsync(await response.arrayBuffer(),'')).scene;
+    }).catch(error=>{armVisuals.delete(embodiment);throw error;});
+    armVisuals.set(embodiment,pending);
+  }
+  return pending;
 }
 
 export type EditableSceneObject = {
@@ -60,7 +75,8 @@ export default function Viewport({frame,compact=false,objects=[],selectedObjectI
     renderer.setPixelRatio(Math.min(window.devicePixelRatio,2));
     renderer.shadowMap.enabled=true;
     renderer.shadowMap.type=THREE.PCFSoftShadowMap;
-    renderer.setClearColor(getComputedStyle(el).getPropertyValue('--viewport-background').trim()||'#1a2420');
+    const background=new THREE.Color(getComputedStyle(el).getPropertyValue('--viewport-background').trim()||'#131312');
+    renderer.setClearColor(background);
     renderer.outputColorSpace=THREE.SRGBColorSpace;
     renderer.domElement.tabIndex=0;
     el.appendChild(renderer.domElement);
@@ -70,10 +86,12 @@ export default function Viewport({frame,compact=false,objects=[],selectedObjectI
     camera.position.set(1.2,-1.5,1.05);
     const controls=new OrbitControls(camera,renderer.domElement);
     controls.target.set(0,0,.15);controls.enableDamping=true;controls.minDistance=.6;controls.maxDistance=3.8;controls.maxPolarAngle=Math.PI*.49;
-    scene.add(new THREE.HemisphereLight(0xe5eee0,0x304735,2.3));
-    const light=new THREE.DirectionalLight(0xfff5dc,3);light.position.set(-.5,-.8,2);light.castShadow=true;
+    scene.fog=new THREE.Fog(background,3.2,6.5);
+    scene.add(new THREE.HemisphereLight(0xf4efe6,0x2c2a26,2.2));
+    const rim=new THREE.DirectionalLight(0xffb487,.55);rim.position.set(.9,1.3,.7);scene.add(rim);
+    const light=new THREE.DirectionalLight(0xfff1e0,3);light.position.set(-.5,-.8,2);light.castShadow=true;
     light.shadow.mapSize.set(2048,2048);light.shadow.camera.left=-1;light.shadow.camera.right=1;light.shadow.camera.top=1;light.shadow.camera.bottom=-1;light.shadow.normalBias=.004;scene.add(light);
-    const grid=new THREE.GridHelper(2.8,40,0x617368,0x33473c);grid.rotation.x=Math.PI/2;grid.position.z=-.073;scene.add(grid);
+    const grid=new THREE.GridHelper(2.8,40,0x57544d,0x2a2926);grid.rotation.x=Math.PI/2;grid.position.z=-.073;scene.add(grid);
     const meshes=new Map<string,THREE.Mesh>();
     const signatures=new Map<string,string>();
     let disposed=false;
@@ -99,6 +117,35 @@ export default function Viewport({frame,compact=false,objects=[],selectedObjectI
         node.matrixAutoUpdate=false;
       }
       scene.add(robotRoot);
+    };
+    // Registry arms: CAD meshes placed on recorded link poses (frame.robot_bodies).
+    let requestedArm='';
+    let armRoot:THREE.Group|undefined;
+    const armNodes:{node:THREE.Object3D;relative:THREE.Matrix4;body:string}[]=[];
+    const installArm=(group:THREE.Group)=>{
+      if(armRoot){scene.remove(armRoot);armNodes.length=0;}
+      armRoot=group.clone(true);
+      armRoot.traverse(object=>{if(object instanceof THREE.Mesh){object.castShadow=true;object.receiveShadow=true;robotPickMeshes.push(object);}});
+      for(const node of armRoot.children){node.updateMatrix();armNodes.push({node,relative:node.matrix.clone(),body:String(node.userData.body)});node.matrixAutoUpdate=false;}
+      scene.add(armRoot);
+    };
+    const linkPose=new THREE.Matrix4(),linkQuat=new THREE.Quaternion(),linkPos=new THREE.Vector3(),unitScale=new THREE.Vector3(1,1,1);
+    const syncArm=(next?:Frame)=>{
+      const hidden=new Set<string>();
+      const poses=(next as (Frame&{robot_bodies?:Record<string,number[]>})|undefined)?.robot_bodies;
+      if(!armRoot)return hidden;
+      const metadata=armRoot.userData;
+      const matches=!!poses&&next?.embodiment===metadata.embodiment&&armNodes.every(item=>poses[item.body]);
+      armRoot.visible=matches;
+      if(!matches||!poses)return hidden;
+      for(const {node,relative,body} of armNodes){
+        const [x,y,z,qw,qx,qy,qz]=poses[body];
+        linkPose.compose(linkPos.set(x,y,z),linkQuat.set(qx,qy,qz,qw),unitScale);
+        node.matrix.multiplyMatrices(linkPose,relative);node.matrixWorldNeedsUpdate=true;
+      }
+      const prefix=String(metadata.geom_prefix||'');
+      if(prefix)next?.geoms.forEach(geom=>{if(geom.name.startsWith(prefix))hidden.add(geom.name);});
+      return hidden;
     };
     const robotAnchorMatrix=new THREE.Matrix4();
     const syncRobot=(next?:Frame)=>{
@@ -249,7 +296,12 @@ export default function Viewport({frame,compact=false,objects=[],selectedObjectI
         requestedPanda=true;
         loadPandaVisuals().then(group=>{if(!disposed)pendingPanda=group;}).catch(()=>{});
       }
-      const hiddenRobotGeoms=syncRobot(next);
+      const armFrame=next as (Frame&{robot_bodies?:Record<string,number[]>})|undefined;
+      if(armFrame?.robot_bodies&&armFrame.embodiment&&requestedArm!==armFrame.embodiment){
+        const wanted=armFrame.embodiment;requestedArm=wanted;
+        loadArmVisuals(wanted).then(group=>{if(!disposed&&requestedArm===wanted){installArm(group);update.current?.(lastFrame);}}).catch(()=>{});
+      }
+      const hiddenRobotGeoms=new Set([...syncRobot(next),...syncArm(next)]);
       const visible=new Set(next?.geoms.filter(geom=>geom.color[3]>0&&!hiddenRobotGeoms.has(geom.name)).map(geom=>geom.name)||[]);
       for(const [name,mesh] of meshes){if(!visible.has(name)){disposeMesh(mesh);meshes.delete(name);signatures.delete(name);}}
       if(next)for(const geom of next.geoms){
@@ -306,9 +358,9 @@ export default function Viewport({frame,compact=false,objects=[],selectedObjectI
   return <div className={'viewport '+(compact?'compact ':'')+(editing?'viewport-editing ':'')+(dragging?'viewport-dragging':'')}>
     <div ref={host} className="canvas-host" aria-label={editing?'Interactive 3D scene editor':'Interactive 3D replay of recorded MuJoCo geometry'} aria-describedby={editing?instructionsId:undefined}/>
     {failure&&<div className="viewport-error">{failure}</div>}
-    <div className="viewport-top"><span className="sim-tag"><span className="dot"/> MUJOCO <span className="separator">/</span> {frame?.embodiment==='franka-panda-v1'?'FRANKA PANDA':'CARTESIAN GRIPPER'}</span><span className="view-tag">{editing?'Edit scene':'Perspective'}</span></div>
+    <div className="viewport-top"><span className="sim-tag"><span className="dot"/> MUJOCO <span className="separator">/</span> {!frame?'NO RECORDING':ROBOT_TAGS[frame.embodiment??'']??(frame.embodiment?frame.embodiment.toUpperCase():'CARTESIAN GRIPPER')}</span><span className="view-tag">{editing?'Edit scene':'Perspective'}</span></div>
     {editing&&selected&&<div className="viewport-selection" aria-live="polite">{selected.editable?<Move size={13}/>:<LockKeyhole size={13}/>}<strong>{selected.label}</strong><span>{disabled?'Updating scene…':dragging?'Release to apply':selected.editable?'Drag an axis to move':'Fixed object'}</span></div>}
     <div className="viewport-bottom"><span><span className="axis x">X</span><span className="axis y">Y</span><span className="axis z">Z</span><span className="orbit-hint">Drag to orbit · Scroll to zoom</span></span><div className="view-buttons"><button title="Overhead view" aria-label="Overhead view" onClick={()=>reset.current(true)}><Scan size={16}/></button><button title="Reset view" aria-label="Reset view" onClick={()=>reset.current(false)}><RotateCcw size={16}/></button><button title="Fullscreen" aria-label="Fullscreen" onClick={()=>host.current?.parentElement?.requestFullscreen().catch(()=>{})}><Maximize2 size={16}/></button></div></div>
-    {editing?<div className="viewport-edit-hint" id={instructionsId}>Select an object · Drag colored axes · Esc cancels</div>:<div className="scene-legend"><span><i className="legend-block"/> Target object</span><span><i className="legend-tray"/> Placement zone</span></div>}
+    {editing?<div className="viewport-edit-hint" id={instructionsId}>Select an object · Drag colored axes · Esc cancels</div>:(frame?.geoms.some(g=>g.name==='block')||frame?.geoms.some(g=>g.name==='tray_base'))&&<div className="scene-legend">{frame?.geoms.some(g=>g.name==='block')&&<span><i className="legend-block"/> Target object</span>}{frame?.geoms.some(g=>g.name==='tray_base')&&<span><i className="legend-tray"/> Placement zone</span>}</div>}
   </div>;
 }

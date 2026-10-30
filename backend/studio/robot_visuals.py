@@ -42,7 +42,21 @@ def visual_glb(model, license_text):
         "collision_offsets": [i - first for i in recorded], "source": SOURCE,
         "license": "Apache-2.0", "license_text": license_text,
         "description": "CAD display surfaces only. Motion comes from recorded MuJoCo geometry transforms."}
-    document = {"asset": {"version": "2.0", "generator": "Robot Harness Studio", "copyright": license_text},
+    nodes = []
+    for i in range(model.ngeom):
+        if model.geom_group[i] != 2:
+            continue
+        anchor = anchors.get(int(model.geom_bodyid[i]))
+        if anchor is None:
+            raise ValueError("A robot visual has no recorded anchor.")
+        relative = np.linalg.inv(geom_transform(model, anchor)) @ geom_transform(model, i)
+        nodes.append((i, f"panda_visual_{i}", relative, {"anchor_offset": anchor - first, "visual_geom_index": i}))
+    return build_glb(model, nodes, metadata, license_text)
+
+
+def build_glb(model, nodes, metadata, copyright):
+    """Write one binary glTF holding each (geom, node name, transform, extras) visual mesh."""
+    document = {"asset": {"version": "2.0", "generator": "Robot Harness Studio", "copyright": copyright},
         "scene": 0, "scenes": [{"nodes": [], "extras": metadata}], "nodes": [], "meshes": [],
         "materials": [], "accessors": [], "bufferViews": [], "buffers": []}
     binary = bytearray()
@@ -62,14 +76,9 @@ def visual_glb(model, license_text):
         return index
 
     total_vertices = 0
-    for i in range(model.ngeom):
-        if model.geom_group[i] != 2:
-            continue
+    for i, name, relative, extras in nodes:
         if model.geom_type[i] != mujoco.mjtGeom.mjGEOM_MESH:
             raise ValueError("Unsupported native robot visual geometry.")
-        anchor = anchors.get(int(model.geom_bodyid[i]))
-        if anchor is None:
-            raise ValueError("A robot visual has no recorded anchor.")
         mid = int(model.geom_dataid[i])
         vstart, vcount = int(model.mesh_vertadr[mid]), int(model.mesh_vertnum[mid])
         fstart, fcount = int(model.mesh_faceadr[mid]), int(model.mesh_facenum[mid])
@@ -90,10 +99,8 @@ def visual_glb(model, license_text):
         mesh = len(document["meshes"])
         document["meshes"].append({"primitives": [{"attributes": {"POSITION": accessor(positions, True), "NORMAL": accessor(normals)},
             "material": materials[material_key]}]})
-        relative = np.linalg.inv(geom_transform(model, anchor)) @ geom_transform(model, i)
         node = len(document["nodes"])
-        document["nodes"].append({"name": f"panda_visual_{i}", "mesh": mesh, "matrix": relative.T.reshape(-1).tolist(),
-            "extras": {"anchor_offset": anchor - first, "visual_geom_index": i}})
+        document["nodes"].append({"name": name, "mesh": mesh, "matrix": relative.T.reshape(-1).tolist(), "extras": extras})
         document["scenes"][0]["nodes"].append(node)
     document["buffers"] = [{"byteLength": len(binary)}]
     encoded = json.dumps(document, separators=(",", ":"), allow_nan=False).encode()
@@ -122,6 +129,49 @@ def panda_visuals(request: Request):
         payload, compressed, digest = visual_bundle(str(folder), (folder / "panda.xml").stat().st_mtime_ns, (folder / "LICENSE").stat().st_mtime_ns)
     except (OSError, ValueError):
         raise HTTPException(503, "The optional Panda display assets are unavailable. Recorded geometry remains accessible.") from None
+    headers = {"Cache-Control": "private, max-age=3600", "ETag": '"' + digest + '"', "Vary": "Accept-Encoding"}
+    if request.headers.get("if-none-match") == headers["ETag"]:
+        return Response(status_code=304, headers=headers)
+    if "gzip" in request.headers.get("accept-encoding", ""):
+        headers["Content-Encoding"] = "gzip"
+        payload = compressed
+    return Response(payload, media_type="model/gltf-binary", headers=headers)
+
+
+def arm_visual_glb(config):
+    """Visual meshes of a registry arm, each placed relative to its link; frames carry link poses."""
+    from studio.adapters.arms import MENAGERIE_COMMIT, arm_spec, robot_visual_bodies
+    from studio.schemas import Scene
+    model = arm_spec(Scene(embodiment=config.id, include_cube=False, include_tray=False), config).compile()
+    bodies = robot_visual_bodies(model, config)
+    nodes = [(i, f"{config.id}_visual_{i}", geom_transform(model, i), {"body": model.body(int(model.geom_bodyid[i])).name})
+        for i in range(model.ngeom) if model.geom_group[i] == 2 and int(model.geom_bodyid[i]) in bodies]
+    licenses = {part.folder: (folder / "LICENSE").read_text() for part, folder in zip(config.parts, config.asset_folders())}
+    metadata = {"embodiment": config.id, "robot_asset_commit": MENAGERIE_COMMIT, "geom_prefix": config.parts[0].prefix,
+        "source": "https://github.com/google-deepmind/mujoco_menagerie/tree/" + MENAGERIE_COMMIT, "license": "Apache-2.0",
+        "license_text": "\n\n".join(f"{name}:\n{text}" for name, text in licenses.items()),
+        "description": "CAD display surfaces only. Motion comes from recorded MuJoCo link poses."}
+    return build_glb(model, nodes, metadata, metadata["license_text"])
+
+
+@lru_cache(maxsize=4)
+def arm_bundle(embodiment, stamp):
+    from studio.adapters.arms import CONFIGS
+    payload = arm_visual_glb(CONFIGS[embodiment])
+    return payload, gzip.compress(payload, compresslevel=6, mtime=0), hashlib.sha256(payload).hexdigest()
+
+
+@router.get("/arm/{embodiment}.glb")
+def arm_visuals(embodiment: str, request: Request):
+    from studio.adapters.arms import CONFIGS
+    config = CONFIGS.get(embodiment)
+    if config is None:
+        raise HTTPException(404, "No display assets for that robot.")
+    try:
+        stamp = tuple((folder / part.file).stat().st_mtime_ns for part, folder in zip(config.parts, config.asset_folders()))
+        payload, compressed, digest = arm_bundle(embodiment, stamp)
+    except (OSError, ValueError):
+        raise HTTPException(503, "The optional robot display assets are unavailable. Recorded geometry remains accessible.") from None
     headers = {"Cache-Control": "private, max-age=3600", "ETag": '"' + digest + '"', "Vary": "Accept-Encoding"}
     if request.headers.get("if-none-match") == headers["ETag"]:
         return Response(status_code=304, headers=headers)

@@ -63,10 +63,9 @@ def rendered_frames(artifact, indexes, camera="overview"):
 
 
 def judge_connections():
-    from studio.author_providers import codex_status
-    codex = codex_status()
+    from studio.author_providers import claude_status, codex_status
     configured = bool(os.environ.get("STUDIO_JUDGE_ENDPOINT"))
-    return [{**codex, "model": "gpt-6-astra"},
+    return [{**codex_status(), "model": "gpt-6-astra"}, {**claude_status(), "model": "claude-opus-5-5"},
         {"id": "openai", "name": "VLM API endpoint", "configured": configured,
          "message": "VLM endpoint configured." if configured else "Set STUDIO_JUDGE_ENDPOINT and optionally STUDIO_JUDGE_TOKEN on the backend."}]
 
@@ -75,10 +74,12 @@ def judge_connection(judge):
     if judge["kind"] == "state":
         return {"id": "state", "configured": True, "message": "Local recorded-state checks."}
     provider = judge.get("provider", "openai")
-    if provider not in {"codex", "openai"}:
-        raise ValueError("Choose codex or openai for the judge provider")
+    if provider not in {"codex", "claude", "openai"}:
+        raise ValueError("Choose codex, claude, or openai for the judge provider")
     if provider == "codex" and judge.get("model") != "gpt-6-astra":
         raise ValueError("The Codex judge requires the exact model gpt-6-astra")
+    if provider == "claude" and judge.get("model") != "claude-opus-5-5":
+        raise ValueError("The Claude Code judge requires the exact model claude-opus-5-5")
     return next(item for item in judge_connections() if item["id"] == provider)
 
 
@@ -206,7 +207,7 @@ def evaluate(artifact, judge):
         if "inspect_state" not in judge["tools"]:
             raise ValueError("The state baseline requires inspect_state")
         return state_judge(artifact, judge)
-    if judge.get("provider", "openai") == "codex":
+    if judge.get("provider", "openai") in {"codex", "claude"}:
         from studio.codex_judge import codex_judge
         return codex_judge(artifact, judge)
     return vlm_judge(artifact, judge)

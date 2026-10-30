@@ -6,9 +6,9 @@ The scene author, robot actor, and judge have separate jobs:
 
 | Role | Available implementation |
 | --- | --- |
-| Scene author | GPT-6 Astra takes photos, measurements, and instructions; proposes a scene; runs MuJoCo; inspects feedback; and revises it. |
-| Robot actor | Astra generates motion programs with bounded revisions and frozen holdouts. The optional pretrained ICRT worker predicts actions from demonstration context and camera/proprioception observations. Replay and external HTTP adapters are also available. |
-| Judge | Local numerical task checks, GPT-6 Astra through a saved Codex login, or a configurable VLM endpoint, followed by per-outcome human review. |
+| Scene author | GPT-6 Astra or Claude Opus 5.5 (switch in the chat composer) takes photos, measurements, and instructions; proposes a scene; runs MuJoCo; inspects feedback; and revises it. |
+| Robot actor | GPT-6 Astra or Claude Opus 5.5 generates motion programs with bounded revisions and frozen holdouts. The optional pretrained ICRT worker predicts actions from demonstration context and camera/proprioception observations. Replay and external HTTP adapters are also available. |
+| Judge | Local numerical task checks, GPT-6 Astra through a saved Codex login, Claude Opus 5.5 through a Claude Code login, or a configurable VLM endpoint, followed by per-outcome human review. |
 
 Live Astra authoring and judging, pretrained ICRT inference, and a contact-based Franka teacher have been exercised locally. After correcting two action/timing integration defects, the matched ICRT comparison still scored 0/3 successful attempts with each of zero, one, and two demonstrations. The generated teachers passed; learned task execution remains unresolved. See [validation results](docs/validation.md) and the [ICRT integration report](integrations/icrt/README.md) for the exact tests and limits. A later [feedback-driven experiment](docs/iteration-results.md) produced an Astra-authored, simulator-state-assisted conveyor controller that passed 3/3 holdout seeds. Ten additional ICRT candidates still failed; the actors and observation contracts are reported separately. A subsequent [ICRT investigation](docs/icrt-diagnosis.md) fixed a native flange/fingertip frame mismatch in adapter v3; corrected retests still failed, so the remaining failure cause is unresolved.
 
@@ -38,7 +38,7 @@ For separate terminals, run `uv sync --frozen` and `uv run uvicorn studio.main:a
 
 The [workspace guide](docs/agent-workspace.md) explains selection, revisions, saved drafts, editing limits, and task preservation.
 
-Both author connections use exactly `gpt-6-astra`. The default prefers a saved Codex ChatGPT login; each draft preserves its chosen connection. The studio asks Codex to use its own saved login and never reads or copies its token. Codex calls consume subscription usage; API calls use the API project. Uploading a photo stores it locally; generation sends the selected references and brief through the chosen connection.
+The Codex and OpenAI API connections use exactly `gpt-6-astra`; the Claude Code connection uses exactly `claude-opus-5-5` (see [Claude Opus 5.5](docs/claude-opus.md)). Switch models from the composer's model menu; each message's draft keeps the model it was sent with. The default prefers a saved Codex ChatGPT login; each draft preserves its chosen connection. The studio asks Codex to use its own saved login and never reads or copies its token. Codex calls consume subscription usage; API calls use the API project. Uploading a photo stores it locally; generation sends the selected references and brief through the chosen connection.
 
 Task requirements are human-owned versions. **Edit as new version** changes outcome definitions and teacher operations without rewriting previous recordings. The author can arrange the scene and motion but cannot save changes to the task. The judge rubric describes how to inspect those requirements. Demonstration exports retain their task snapshot, and legacy imports remain supported.
 
@@ -81,6 +81,8 @@ ICRT receives side/wrist images and robot proprioception, not task text or judge
 The replay baseline selects the closest demonstrated starting position and replays absolute actions. It does not perform ICL. Use the [HTTP adapter contract](docs/adapter-protocol.md) for another actor. GEN-1.5 and S1 adapters are not included.
 
 ## Run Astra experiments
+
+In Workspace, **LLM motion programs** has a **Motion-program LLM** switch: GPT-6 Astra (Codex subscription) or Claude Opus 5.5 (Claude Code subscription). The same model also drives in-episode camera checkpoints. The [robomimic-derived evals](docs/robomimic-evals.md) compare both models on ported Lift and Can tasks.
 
 Choose **GPT-6 Astra · motion programs** in Workspace. Set a development proposal budget and final evaluation count, then run with a selected state or VLM judge. Astra receives initial cameras, simulator state, and sampled demonstration state/action pairs. It can revise its motion program between attempts. The first program passing both state and judge checks is frozen for fresh holdout scenes. Proposals, failed recordings, and original verdicts remain available for review.
 

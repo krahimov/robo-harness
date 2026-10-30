@@ -246,7 +246,7 @@ def test_codex_draft_keeps_provider_when_default_changes(client, monkeypatch):
     scene = draft(client, provider="codex")
     monkeypatch.setenv("STUDIO_AUTHOR_PROVIDER", "openai")
     received = []
-    def fake_codex(saved_draft, parent_program, progress, event):
+    def fake_codex(saved_draft, parent_program, progress, event, **options):
         received.append(saved_draft["provider"])
         return compiled_result()
     monkeypatch.setattr(codex_author, "author_scene_codex", fake_codex)

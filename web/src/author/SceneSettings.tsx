@@ -1,7 +1,9 @@
 import {useRef} from 'react';
 import {Box,Camera,FileUp,Plus,RefreshCw,Upload,X} from 'lucide-react';
-import type {TaskSpec} from '../types';
+import {PROVIDER_LABELS,type AuthorProvider,type RobotInfo,type TaskSpec} from '../types';
 import type {SceneStudio} from './useSceneStudio';
+
+const FALLBACK_ROBOTS:RobotInfo[]=[{id:'franka-panda-v1',name:'Franka Panda',capabilities:['contact_fingers'],description:'',available:true},{id:'cartesian-gripper-v1',name:'Cartesian gripper',capabilities:['weld_grasp'],description:'',available:true}];
 
 export default function SceneSettings({studio:s,onClose,onEditTask,onCamera}:{studio:SceneStudio;onClose:()=>void;onEditTask:(task:TaskSpec)=>void;onCamera:()=>void}){
   const meshInput=useRef<HTMLInputElement>(null);
@@ -11,13 +13,13 @@ export default function SceneSettings({studio:s,onClose,onEditTask,onCamera}:{st
     <div className="agent-settings-body">
       <label>Scene name<input value={config.name} disabled={blocked} maxLength={100} onChange={e=>patchConfig({name:e.target.value})}/></label>
       <div className="agent-field-row">
-        <label>Author connection<select value={config.provider} disabled={blocked} onChange={e=>patchConfig({provider:e.target.value as typeof config.provider})}><option value="codex">Codex subscription</option><option value="openai">OpenAI API</option></select></label>
+        <label>Author model<select value={config.provider} disabled={blocked} onChange={e=>patchConfig({provider:e.target.value as typeof config.provider})}>{(Object.keys(PROVIDER_LABELS) as AuthorProvider[]).map(id=><option key={id} value={id}>{PROVIDER_LABELS[id]}{s.author?.providers.find(p=>p.id===id)?.configured===false?' · not connected':''}</option>)}</select></label>
         <label>Scene generation<select value={config.builder} disabled={blocked} onChange={e=>patchConfig({builder:e.target.value as typeof config.builder})}><option value="blender">Blender + MuJoCo</option><option value="mujoco">MuJoCo primitives</option></select></label>
       </div>
       <p>{s.connection?.message??'Checking author connection…'}</p>
       <p>{config.builder==='blender'?(s.author?.blender?.configured?`Blender ${s.author.blender.version} ready`:s.author?.blender?.message??'Checking Blender…'):'Geometry and physics are generated directly in MuJoCo.'}</p>
       <button className="agent-text" disabled={blocked} onClick={s.refreshConnection}><RefreshCw size={13}/>Check connections</button>
-      <label>Robot<select value={config.embodiment} disabled={blocked} onChange={e=>patchConfig({embodiment:e.target.value as typeof config.embodiment})}><option value="franka-panda-v1">Franka Panda · finger contacts</option><option value="cartesian-gripper-v1">Cartesian gripper · idealized grasp</option></select></label>
+      <label>Robot<select value={config.embodiment} disabled={blocked} onChange={e=>patchConfig({embodiment:e.target.value as typeof config.embodiment})}>{(s.robots.length?s.robots:FALLBACK_ROBOTS).map(robot=><option key={robot.id} value={robot.id} disabled={!robot.available&&robot.id!==config.embodiment}>{robot.name} · {robot.capabilities.includes('mobile_base')?'mobile base':robot.capabilities.includes('dexterous_hand')?'dexterous hand':robot.capabilities.includes('contact_fingers')?'finger contacts':'idealized grasp'}{robot.available?'':' · assets not installed'}</option>)}</select></label>
       <label>Task requirements<select value={config.taskId} disabled={blocked} onChange={e=>{const task=s.tasks.find(t=>t.id===e.target.value);patchConfig({taskId:e.target.value,...(task?.suggested_builder?{builder:task.suggested_builder}:{}),...(task?.suggested_scene?.embodiment?{embodiment:task.suggested_scene.embodiment}:{})});}}><option value="">Original block-to-tray task</option>{s.tasks.map(task=><option key={task.id} value={task.id}>{task.name} · v{task.version}</option>)}</select></label>
       {s.task&&<details><summary>{s.task.requirements.length} human-owned outcome checks</summary><p>{s.task.description}</p><ul>{s.task.requirements.map(item=><li key={item.id}><strong>{item.label}</strong><p>{item.definition}</p></li>)}</ul><button className="agent-text" disabled={blocked} onClick={()=>onEditTask(s.task!)}>Edit as a new task version</button></details>}
       <div className="agent-settings-actions"><button disabled={blocked} onClick={()=>s.template(false)}><Box size={14}/>Run task example</button><button disabled={blocked||!s.author?.blender?.configured} onClick={()=>s.template(true)}><Box size={14}/>Blender example</button></div>

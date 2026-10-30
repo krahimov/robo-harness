@@ -29,7 +29,7 @@ def test_saved_chatgpt_login_is_default_without_reading_tokens(monkeypatch):
     status = providers.connection_status()
     assert status["provider"] == "codex"
     assert status["configured"] is True
-    assert [item["configured"] for item in status["providers"]] == [True, True]
+    assert [item["configured"] for item in status["providers"]] == [True, True, False]
     assert "private-api-key" not in str(status)
     assert len(calls) == 1  # Cache protects repeated status rendering.
 
