@@ -1,9 +1,10 @@
 import {useState,useEffect,useRef,type ReactNode} from 'react';
-import {Activity,ArrowDown,ArrowRight,ArrowUp,BookOpen,Box,Check,CheckCheck,ChevronRight,CircleDot,Code2,Download,FileText,FlaskConical,Gauge,GitCompareArrows,Layers3,Loader2,Moon,Pause,Play,Plus,Plug,RotateCcw,Save,Settings2,Shapes,ShieldCheck,SlidersHorizontal,Square,Sun,Terminal,Upload,X} from 'lucide-react';
+import {Activity,ArrowDown,ArrowRight,ArrowUp,BookOpen,Box,Check,CheckCheck,ChevronRight,CircleDot,Code2,Download,FileText,FlaskConical,Gauge,GitCompareArrows,Layers3,Loader2,Moon,Palette,Pause,Play,Plus,Plug,RotateCcw,Save,Settings2,Shapes,ShieldCheck,SlidersHorizontal,Square,Sun,Terminal,Upload,X} from 'lucide-react';
 import Viewport from './Viewport';
 import SceneBuilder from './SceneBuilder';
 import Comparisons from './Comparisons';
 import JudgeLab from './JudgeLab';
+import {designs,storedDesign,type DesignId} from './designs/registry';
 import AstraRunDetails from './AstraRunDetails';
 import {api,providerModel,type ActorProvider,type Bootstrap,type Artifact,type Demo,type Scene,type Judge,type Experiment,type Episode,type Frame,type Waypoint} from './types';
 
@@ -32,10 +33,31 @@ function Modal({title,children,onClose}:{title:string;children:ReactNode;onClose
   return <dialog ref={ref} onCancel={onClose} onClick={e=>{if(e.target===ref.current)onClose();}}><div className="modal-heading"><h2>{title}</h2><button className="icon-button" onClick={onClose} aria-label="Close dialog"><X size={19}/></button></div>{children}</dialog>;
 }
 
+function AppearanceMenu({theme,setTheme,design,setDesign}:{theme:Theme;setTheme:(t:Theme)=>void;design:DesignId;setDesign:(d:DesignId)=>void}){
+  const [open,setOpen]=useState(false);
+  const ref=useRef<HTMLDivElement>(null);
+  useEffect(()=>{if(!open)return;const away=(e:PointerEvent)=>{if(!ref.current?.contains(e.target as Node))setOpen(false);};const key=(e:KeyboardEvent)=>{if(e.key==='Escape')setOpen(false);};document.addEventListener('pointerdown',away);document.addEventListener('keydown',key);return()=>{document.removeEventListener('pointerdown',away);document.removeEventListener('keydown',key);};},[open]);
+  return <div className="appearance" ref={ref}>
+    <button className="theme-toggle" onClick={()=>setOpen(!open)} aria-expanded={open} aria-haspopup="dialog" aria-label="Appearance" title="Appearance"><Palette size={14}/></button>
+    {open&&<div className="appearance-menu" role="dialog" aria-label="Appearance">
+      <div className="appearance-head"><strong>Appearance</strong><div className="segmented appearance-theme" role="radiogroup" aria-label="Theme">
+        <button role="radio" aria-checked={theme==='light'} className={theme==='light'?'selected':''} onClick={()=>setTheme('light')}><Sun size={13}/>Light</button>
+        <button role="radio" aria-checked={theme==='dark'} className={theme==='dark'?'selected':''} onClick={()=>setTheme('dark')}><Moon size={13}/>Dark</button>
+      </div></div>
+      <div className="appearance-list" role="radiogroup" aria-label="Design">{designs.map(d=><button key={d.id} role="radio" aria-checked={design===d.id} className={'appearance-option'+(design===d.id?' active':'')} onClick={()=>setDesign(d.id)}>
+        <span className="appearance-swatch" aria-hidden="true">{d.swatches.map(c=><i key={c} style={{background:c}}/>)}</span>
+        <span className="appearance-text"><b>{d.name}</b><small>{d.description}</small></span>
+        {design===d.id&&<Check size={14} className="appearance-check"/>}
+      </button>)}</div>
+    </div>}
+  </div>;
+}
+
 export default function App(){
   const [data,setData]=useState<Bootstrap>();
   const [tab,setTab]=useState<Tab>('builder');
   const [theme,setTheme]=useState<Theme>(storedTheme);
+  const [design,setDesign]=useState<DesignId>(storedDesign);
   const [error,setError]=useState('');
   const [notice,setNotice]=useState('');
   const [busy,setBusy]=useState(false);
@@ -72,6 +94,7 @@ export default function App(){
   async function loadArtifact(id:string,name:string,ep?:Episode){const token=++playbackToken.current;const next=await api<Artifact>('/artifacts/'+id);if(token!==playbackToken.current)return;setArtifact(next);setFrameIndex(0);setPlaying(false);setRecordingName(name);setEpisode(ep);setCamera(undefined);setReviewNote('');}
   useEffect(()=>{let live=true;api<Bootstrap>('/bootstrap').then(next=>{if(!live)return;setData(next);setSelected(next.demos.length?[next.demos[0].id]:[]);setJudgeId(next.judges[0]?.id||'');if(next.demos[0]){setScene(next.demos[0].scene);setActiveTaskId(next.demos[0].task_id||'');setRunName(next.demos[0].name);setInstructions(next.demos[0].task?.description||'Place the target block inside the tray and release it.');}if(next.demos[0])loadArtifact(next.demos[0].artifact_id,next.demos[0].name).catch(e=>setError(e.message));}).catch(e=>setError(e.message));return()=>{live=false;};},[]);
   useEffect(()=>{document.documentElement.dataset.theme=theme;try{localStorage.setItem('studio-theme',theme);}catch{}},[theme]);
+  useEffect(()=>{document.documentElement.dataset.design=design;try{localStorage.setItem('studio-design',design);}catch{}},[design]);
   useEffect(()=>{if(!notice)return;const timer=setTimeout(()=>setNotice(''),4500);return()=>clearTimeout(timer);},[notice]);
   useEffect(()=>{if(!playing||!artifact)return;const timer=setInterval(()=>setFrameIndex(i=>{if(i>=artifact.frames.length-1){setPlaying(false);return i;}return i+1;}),1000/artifact.frequency);return()=>clearInterval(timer);},[playing,artifact]);
   useEffect(()=>{
@@ -109,7 +132,7 @@ export default function App(){
       <div className="sidebar-bottom">
         <div className={'runtime-card '+runtime}><span className="runtime-led"/><span>{runtime==='online'?'MuJoCo connected':runtime==='connecting'?'Connecting…':runtime==='degraded'?'Simulator unavailable':'Runtime offline'}<small>Local runtime · v0.1</small></span></div>
         <p className="sidebar-motto">Fixed weights. <span>Context does the teaching.</span></p>
-        <div className="sidebar-links"><a href="http://127.0.0.1:8788/docs" target="_blank" rel="noreferrer"><BookOpen size={14}/><span>API reference</span></a><button className="theme-toggle" onClick={()=>setTheme(theme==='dark'?'light':'dark')} aria-label={theme==='dark'?'Switch to light theme':'Switch to dark theme'} title={theme==='dark'?'Light theme':'Dark theme'}>{theme==='dark'?<Sun size={14}/>:<Moon size={14}/>}</button></div>
+        <div className="sidebar-links"><a href="http://127.0.0.1:8788/docs" target="_blank" rel="noreferrer"><BookOpen size={14}/><span>API reference</span></a><AppearanceMenu theme={theme} setTheme={setTheme} design={design} setDesign={setDesign}/></div>
       </div>
     </aside>
     <main>

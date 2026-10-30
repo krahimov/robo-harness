@@ -87,6 +87,9 @@ export default function Viewport({frame,compact=false,objects=[],selectedObjectI
     const controls=new OrbitControls(camera,renderer.domElement);
     controls.target.set(0,0,.15);controls.enableDamping=true;controls.minDistance=.6;controls.maxDistance=3.8;controls.maxPolarAngle=Math.PI*.49;
     scene.fog=new THREE.Fog(background,3.2,6.5);
+    // Designs restyle the viewport backdrop; follow theme/design switches without remounting.
+    const restyle=new MutationObserver(()=>{const next=getComputedStyle(el).getPropertyValue('--viewport-background').trim();if(!next)return;background.set(next);renderer.setClearColor(background);(scene.fog as THREE.Fog).color.copy(background);});
+    restyle.observe(document.documentElement,{attributes:true,attributeFilter:['data-theme','data-design']});
     scene.add(new THREE.HemisphereLight(0xf4efe6,0x2c2a26,2.2));
     const rim=new THREE.DirectionalLight(0xffb487,.55);rim.position.set(.9,1.3,.7);scene.add(rim);
     const light=new THREE.DirectionalLight(0xfff1e0,3);light.position.set(-.5,-.8,2);light.castShadow=true;
@@ -349,6 +352,7 @@ export default function Viewport({frame,compact=false,objects=[],selectedObjectI
       window.removeEventListener('blur',pointerCancel);
       controls.dispose();scene.remove(transformHelper);transform.dispose();
       scene.traverse(obj=>{if(obj instanceof THREE.Mesh||obj instanceof THREE.LineSegments){obj.geometry.dispose();const materials=Array.isArray(obj.material)?obj.material:[obj.material];materials.forEach(m=>m.dispose());}});
+      restyle.disconnect();
       renderer.dispose();renderer.domElement.remove();update.current=()=>{};syncEditing.current=()=>{};reset.current=()=>{};
     };
   },[]);
