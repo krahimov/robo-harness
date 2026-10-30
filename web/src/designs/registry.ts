@@ -13,4 +13,4 @@ export const designs=[
   {id:'keynote',name:'Keynote',description:'Editorial product-page type and generous space.',swatches:['#ffffff','#000000','#bf5af2']},
 ] as const;
 export type DesignId=typeof designs[number]['id'];
-export const storedDesign=():DesignId=>{try{const v=localStorage.getItem('studio-design');return designs.some(d=>d.id===v)?v as DesignId:'bench';}catch{return 'bench';}};
+export const storedDesign=():DesignId=>{try{const v=localStorage.getItem('studio-design');return designs.some(d=>d.id===v)?v as DesignId:'glass';}catch{return 'glass';}};
